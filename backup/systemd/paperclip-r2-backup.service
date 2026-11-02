@@ -1,0 +1,12 @@
+[Unit]
+Description=Paperclip offsite backup to Cloudflare R2
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/paperclip-r2-backup/env
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=2h
+ExecStart=/usr/bin/python3 %h/.local/share/paperclip-r2-backup/paperclip_r2_backup.py

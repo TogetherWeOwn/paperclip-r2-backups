@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Paperclip offsite backup to R2
+
+[Timer]
+OnCalendar=*-*-* 04:20:00 UTC
+Persistent=true
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

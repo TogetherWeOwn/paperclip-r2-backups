@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "r2-backup-console",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  // No public *.workers.dev URL and no routes: the operator attaches a custom
+  // domain separately and puts a Cloudflare Access self-hosted app in front.
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "node_modules/r2-explorer/dashboard",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application",
+    // true = every request (including static files) runs the Worker first, so
+    // the Access JWT check in src/index.ts covers the whole site.
+    "run_worker_first": true
+  },
+  "r2_buckets": [
+    {
+      "binding": "BACKUPS",
+      "bucket_name": "paperclip-backups"
+    }
+  ],
+  "observability": { "enabled": true }
+  // Required secrets (wrangler secret put): ACCESS_TEAM_NAME, ACCESS_AUD
+  // Optional vars/secrets: WRITE_PREFIXES (default "db/,instance/,status/", "*" = unrestricted)
+}
