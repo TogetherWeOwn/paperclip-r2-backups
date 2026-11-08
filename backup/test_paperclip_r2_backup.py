@@ -7,6 +7,7 @@ import tarfile
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import paperclip_r2_backup as b  # noqa: E402
@@ -59,6 +60,7 @@ class FakeRclone:
 
     def put_bytes(self, data, key):
         self.puts[key] = json.loads(data)
+        self.store[key] = len(data)
 
 
 class GfsTests(unittest.TestCase):
@@ -282,6 +284,9 @@ class RunFixture(unittest.TestCase):
             with open(os.path.join(self.inst, rel), "w") as f:
                 f.write(data)
         self.now = T(2026, 11, 2, 4, 20)
+        clock = mock.patch.object(b.snapshots, "utc_now", return_value=self.now)
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
         p = os.path.join(self.backups, "paperclip-20261102-003716.sql.gz")
         with gzip.open(p, "wb") as f:
             f.write(b"sql" * 100)
@@ -311,7 +316,8 @@ class RunTests(RunFixture):
         rc = FakeRclone()
         b.run(self.cfg, rc, self.now)
         n = len(rc.uploaded)
-        self.assertEqual(b.run(self.cfg, rc, self.now + dt.timedelta(minutes=5)), 0)
+        self.clock.return_value = self.now + dt.timedelta(minutes=5)
+        self.assertEqual(b.run(self.cfg, rc, self.clock.return_value), 0)
         self.assertEqual(len(rc.uploaded), n)
 
     def test_instance_tar_excludes_secrets_by_default(self):
@@ -335,7 +341,7 @@ class RunTests(RunFixture):
         env["INCLUDE_SECRETS"] = "true"
         self.assertTrue(b.load_config(env).include_secrets)
 
-    def test_cap_reached_no_upload_exit_2_status_written(self):
+    def test_cap_reached_no_upload_exit_2_status_cannot_grow_over_cap(self):
         self.cfg.cap_bytes = 100
         old = objs_for([T(2026, 10, 1) + dt.timedelta(days=i) for i in range(10)], size=50)
         rc = FakeRclone(old)
@@ -343,10 +349,8 @@ class RunTests(RunFixture):
         self.assertEqual(code, 2)
         self.assertEqual(rc.uploaded, [])
         self.assertEqual(rc.deleted, [])
-        st = rc.puts["status/last-run.json"]
-        self.assertFalse(st["ok"])
-        self.assertEqual(st["exit_code"], 2)
-        self.assertIn("cap", st["error"])
+        self.assertNotIn(b.STATUS_KEY, rc.puts)
+        self.assertEqual(sum(rc.store.values()), 500)
         self.assertFalse(os.listdir(self.tmp))
 
     def test_upload_failure_blocks_retention_exit_1(self):
@@ -421,6 +425,7 @@ class ClockSanityTests(RunFixture):
     def test_future_dated_objects_abort_retention(self):
         # host clock jumped back to January: every remote object is "in the future"
         now = T(2026, 1, 10, 4, 20)
+        self.clock.return_value = now
         p = os.path.join(self.backups, "paperclip-20260110-003716.sql.gz")
         with gzip.open(p, "wb") as f:
             f.write(b"sql")
@@ -435,6 +440,7 @@ class ClockSanityTests(RunFixture):
 
     def test_clock_jump_forward_skips_retention_and_exits_nonzero(self):
         now = T(2028, 11, 2, 4, 20)
+        self.clock.return_value = now
         p = os.path.join(self.backups, "paperclip-20281102-003716.sql.gz")
         with gzip.open(p, "wb") as f:
             f.write(b"sql")
@@ -468,8 +474,8 @@ class ClockSanityTests(RunFixture):
     def test_dump_age_boundary(self):
         # dump named 00:37, 25h later is still accepted
         rc = FakeRclone()
-        self.assertEqual(b.run(self.cfg, rc, T(2026, 11, 2, 0, 37) + dt.timedelta(hours=25),
-                               ), 0)
+        self.clock.return_value = T(2026, 11, 2, 0, 37) + dt.timedelta(hours=25)
+        self.assertEqual(b.run(self.cfg, rc, self.clock.return_value), 0)
 
 
 class CapProjectionTests(RunFixture):
@@ -481,6 +487,7 @@ class CapProjectionTests(RunFixture):
         self.cfg.cap_bytes = 3950
         for day in range(3):
             now = self.now + dt.timedelta(days=day)
+            self.clock.return_value = now
             name = f"paperclip-{now - dt.timedelta(hours=4):%Y%m%d-%H%M%S}.sql.gz"
             p = os.path.join(self.backups, name)
             with gzip.open(p, "wb") as f:
@@ -511,6 +518,132 @@ class CapProjectionTests(RunFixture):
         rc = FakeRclone(objs_for([T(2026, 11, 1, 4) - dt.timedelta(days=i) for i in range(3)], 50))
         self.assertEqual(b.run(self.cfg, rc, self.now, dry_run=True), 2)
         self.assertEqual((rc.uploaded, rc.deleted), ([], []))
+
+
+class InheritedBoundaryTests(RunFixture):
+    def test_native_only_upload_ages_dump_from_25h_to_27h(self):
+        invoked = T(2026, 11, 2, 0, 37, 16) + dt.timedelta(hours=25)
+        finished = invoked + dt.timedelta(hours=2)
+        rc = FakeRclone(objs_for([invoked - dt.timedelta(hours=25, days=i) for i in range(9)]))
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        with mock.patch.object(b.snapshots, "utc_now", side_effect=(invoked, invoked, finished)), \
+                mock.patch.object(b.snapshots.time, "monotonic", side_effect=(0, 0, 7200)):
+            self.assertEqual(b.run(self.cfg, rc, invoked), b.EXIT_ERROR)
+        self.assertIn("26h", rc.puts[b.STATUS_KEY]["error"])
+        self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
+        self.assertEqual(rc.deleted, [])
+
+    def test_exact_data_cap_reserves_status_growth_before_upload(self):
+        instance = f"instance/{self.now:%Y/%m/%d}/paperclip-instance-{self.now:%Y%m%d-%H%M%S}.tar.gz"
+        rc = FakeRclone([b.Obj(instance, 10), b.Obj(b.STATUS_KEY, 2)])
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        self.cfg.cap_bytes = sum(rc.store.values()) + os.path.getsize(dump)
+        with mock.patch.object(b.snapshots, "utc_now", return_value=self.now):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
+        self.assertEqual(rc.uploaded, [])
+        self.assertLessEqual(sum(rc.store.values()), self.cfg.cap_bytes)
+
+    def test_native_only_clock_faults_fail_before_retention(self):
+        for observed, ticks in ((self.now - dt.timedelta(seconds=1), (0, 0, 1)),
+                                (self.now + dt.timedelta(seconds=20), (0, 0, 1))):
+            with self.subTest(observed=observed):
+                rc = FakeRclone()
+                with mock.patch.object(b.snapshots, "utc_now", side_effect=(self.now, self.now, observed)), \
+                        mock.patch.object(b.snapshots.time, "monotonic", side_effect=ticks):
+                    self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+                self.assertEqual(rc.deleted, [])
+                self.assertIn("clock", rc.puts[b.STATUS_KEY]["error"])
+
+    def test_status_replacement_exact_cap_and_one_byte_over(self):
+        # Fixed serialized bytes isolate the replacement arithmetic from JSON length.
+        data = b'{"ok":true}'
+        for previous in (0, 2, len(data), 2048):
+            for spare in (0, -1):
+                with self.subTest(previous=previous, spare=spare):
+                    dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+                    instance = f"instance/{self.now:%Y/%m/%d}/paperclip-instance-{self.now:%Y%m%d-%H%M%S}.tar.gz"
+                    objs = [b.Obj(b.db_key_for(dump), 10), b.Obj(instance, 10),
+                            b.Obj("status/restore-last.json", 5)]
+                    if previous:
+                        objs.append(b.Obj(b.STATUS_KEY, previous))
+                    rc = FakeRclone(objs)
+                    # No shrink credit at admission, but exact replacement at publication.
+                    self.cfg.cap_bytes = 25 + max(previous, len(data)) + spare
+                    with mock.patch.object(b, "status_data", return_value=data):
+                        code = b.run(self.cfg, rc, self.now)
+                    self.assertEqual(code, b.EXIT_OK if spare == 0 else b.EXIT_CAP)
+                    self.assertLessEqual(sum(rc.store.values()), max(self.cfg.cap_bytes, 25 + previous))
+                    self.assertEqual(rc.uploaded, [])
+                    self.assertEqual(rc.store["status/restore-last.json"], 5)
+
+    def test_actual_serialized_success_is_reserved(self):
+        rc = FakeRclone()
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_OK)
+        status = rc.puts[b.STATUS_KEY]
+        self.assertEqual(status["projected_bytes"], sum(rc.store.values()))
+        self.assertEqual(rc.store[b.STATUS_KEY], len(b.status_data(status)))
+
+    def test_error_status_is_written_when_it_fits(self):
+        self.cfg.cap_bytes = 4096
+        rc = FakeRclone([b.Obj(b.STATUS_KEY, 4096)])
+        # Upload admission fails, but replacing the old receipt with the cap error fits.
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
+        self.assertEqual(rc.uploaded, [])
+        self.assertEqual(rc.puts[b.STATUS_KEY]["exit_code"], b.EXIT_CAP)
+        self.assertIn("cap reached", rc.puts[b.STATUS_KEY]["error"])
+        self.assertLessEqual(sum(rc.store.values()), self.cfg.cap_bytes)
+
+    def test_partial_upload_error_cannot_overwrite_status_past_cap(self):
+        rc = FakeRclone([b.Obj(b.STATUS_KEY, 2)], fail_verify=True)
+        # The verify error is larger than the reserved success receipt.
+        with mock.patch.object(rc, "verify", side_effect=b.BackupError("x" * 5000)):
+            self.cfg.cap_bytes = 4096
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertEqual(len(rc.uploaded), 1)
+        self.assertEqual(rc.deleted, [])
+        self.assertEqual(rc.store[b.STATUS_KEY], 2)
+        self.assertNotIn(b.STATUS_KEY, rc.puts)
+        self.assertLessEqual(sum(rc.store.values()), self.cfg.cap_bytes)
+
+    def test_status_admission_rechecks_inventory_after_partial_delete(self):
+        old = objs_for([self.now - dt.timedelta(days=i) for i in range(1, 10)], 10)
+        rc = FakeRclone(old)
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        original = rc.delete
+
+        def delete(key):
+            if rc.deleted:
+                raise b.BackupError("delete failed")
+            original(key)
+
+        with mock.patch.object(rc, "delete", side_effect=delete):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertEqual(len(rc.deleted), 1)
+        self.assertIn("delete failed", rc.puts[b.STATUS_KEY]["error"])
+        self.assertLessEqual(sum(rc.store.values()), self.cfg.cap_bytes)
+
+    def test_status_inventory_failure_retains_previous_status(self):
+        rc = FakeRclone([b.Obj(b.STATUS_KEY, 1000)])
+        original = rc.list
+        calls = 0
+
+        def inventory(prefix):
+            nonlocal calls
+            calls += 1
+            if calls > len(b.MANAGED_PREFIXES):
+                raise b.BackupError("inventory failed")
+            return original(prefix)
+
+        with mock.patch.object(rc, "list", side_effect=inventory):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertEqual(rc.store[b.STATUS_KEY], 1000)
+        self.assertNotIn(b.STATUS_KEY, rc.puts)
+
+    def test_status_write_failure_returns_error(self):
+        rc = FakeRclone()
+        with mock.patch.object(rc, "put_bytes", side_effect=b.BackupError("write failed")):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertNotIn(b.STATUS_KEY, rc.puts)
 
 
 class TarIntegrityTests(RunFixture):

@@ -482,7 +482,8 @@ class BackupSnapshotTests(RunFixture):
                 for t, size in zip(stamps, (1, 100, 1, 1, 1))]
         # Native/instance already present: exactly two small supplemental uploads.
         objs += [b.Obj(b.db_key_for(native), 1),
-                 b.Obj(f"instance/{before:%Y/%m/%d}/paperclip-instance-{before:%Y%m%d-%H%M%S}.tar.gz", 1)]
+                 b.Obj(f"instance/{before:%Y/%m/%d}/paperclip-instance-{before:%Y%m%d-%H%M%S}.tar.gz", 1),
+                 b.Obj(b.STATUS_KEY, 8192)]  # existing receipt covers replacement without growth
         rc = FakeRclone(objs)
         self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 2, 0
         self.cfg.max_deletes = 1

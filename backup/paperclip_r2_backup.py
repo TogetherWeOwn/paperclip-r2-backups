@@ -492,9 +492,37 @@ def check_dump_fresh(dump: str, dump_ts: dt.datetime, now: dt.datetime) -> None:
                           "Paperclip backups appear to have stopped")
 
 
+def status_data(status: dict) -> bytes:
+    return (json.dumps(status, indent=2, sort_keys=True) + "\n").encode()
+
+
+def projected_with_status(status: dict, existing: dict, incoming: list[Obj],
+                          plans: dict, projected: int) -> int:
+    """Reserve positive replacement growth of the planned success receipt.
+
+    Never credit status shrinkage to admit data. The actual receipt (including
+    failure paths) is re-admitted from a fresh inventory before publication.
+    """
+    receipt = dict(status, ok=True, exit_code=EXIT_OK, error=None,
+                   uploaded=[{"key": o.key, "size": o.size} for o in incoming],
+                   deleted=[k for plan in plans.values() for k in plan.delete],
+                   kept={p.rstrip("/"): plan.kept for p, plan in plans.items()})
+    objects = [o for objs in existing.values() for o in objs]
+    managed = sum(o.size for o in objects)
+    total = projected
+    while True:
+        receipt["projected_bytes"] = total
+        delta = max(0, snapshots.status_replacement_bytes(objects, STATUS_KEY,
+                                                        status_data(receipt)) - managed)
+        updated = projected + delta
+        if updated == total:
+            return total
+        total = updated
+
+
 def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
     now = now.astimezone(dt.timezone.utc)
-    clock_start = snapshots.utc_now() if cfg.sources and not dry_run else now
+    clock_start = snapshots.utc_now() if not dry_run else now
     start_tick = snapshots.time.monotonic()
     status = {
         "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -579,7 +607,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         # Capture/upload may take hours. Freshness and retention use observation
         # time, not the invocation timestamp retained in the run receipt.
         invoked_at = now
-        if cfg.sources and not dry_run:
+        if not dry_run:
             now = snapshots.utc_now()
             if clock_start < invoked_at:
                 raise BackupError("snapshot clock moved backward since invocation")
@@ -591,6 +619,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         for o in incoming_objs:
             projected_existing[o.key.split("/", 1)[0] + "/"].append(o)
         freed = 0
+        plans = {}
         if not retention_block:
             try:
                 plans = compute_retention(cfg, projected_existing, now, True)
@@ -599,10 +628,13 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             except BackupError as exc:
                 retention_block = str(exc)
         projected = managed + incoming - freed
+        if not dry_run:
+            receipt = dict(status, snapshot_freshness={source.name: True for source in cfg.sources})
+            projected = projected_with_status(receipt, existing, incoming_objs, plans, projected)
         status["projected_bytes"] = projected
-        if incoming_objs and projected > cfg.cap_bytes:
+        if projected > cfg.cap_bytes:
             status["error"] = (f"cap reached: projected {projected} (managed {managed} + "
-                               f"incoming {incoming} - freed {freed}) > cap {cfg.cap_bytes}; "
+                               f"incoming {incoming} - freed {freed}, including status growth) > cap {cfg.cap_bytes}; "
                                "nothing uploaded")
             log(status["error"])
             code = EXIT_CAP
@@ -628,7 +660,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             for o in incoming_objs:
                 existing[o.key.split("/", 1)[0] + "/"].append(o)
 
-        if cfg.sources and not dry_run:
+        if not dry_run:
             observed = snapshots.utc_now()
             if observed < now:
                 raise BackupError("snapshot clock moved backward during upload")
@@ -668,12 +700,20 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
 
     if not dry_run:
         try:
-            rc.put_bytes((json.dumps(status, indent=2, sort_keys=True) + "\n").encode(),
-                         STATUS_KEY)
+            data = status_data(status)
+            # Re-list even on partial upload/delete or failed initial inventory.
+            # The shared CLI lock excludes our other backup/drill writers. If the
+            # exact replacement cannot be admitted, retain the previous object.
+            objects = [o for prefix in MANAGED_PREFIXES for o in rc.list(prefix)]
+            if snapshots.status_replacement_bytes(objects, STATUS_KEY, data) > cfg.cap_bytes:
+                raise BackupError("status would exceed aggregate storage cap; previous status retained")
+            rc.put_bytes(data, STATUS_KEY)
         except Exception as exc:  # noqa: BLE001
             log(f"error: could not write status: {exc}")
             if code == EXIT_OK:
                 code = EXIT_ERROR
+            status["ok"] = False
+            status["exit_code"] = code
     log(f"done: ok={status['ok']} uploaded={len(status['uploaded'])} "
         f"deleted={len(status['deleted'])} managed_bytes={status['managed_bytes']}")
     return code
