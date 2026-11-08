@@ -413,6 +413,143 @@ class RunTests(RunFixture):
             b.load_config({"BACKUP_BUCKET": "x", "RETAIN_DAILY": "abc"})
 
 
+class NativeIntegrityRclone(FakeRclone):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.verified = []
+        self.data = {}
+
+    def upload(self, local, key):
+        super().upload(local, key)
+        with open(local, "rb") as fh:
+            self.data[key] = fh.read()
+
+    def verify(self, local, key):
+        self.verified.append(key)
+        super().verify(local, key)
+        if self.store.get(key) != os.path.getsize(local):
+            raise b.BackupError("verify failed: remote size mismatch")
+        with open(local, "rb") as fh:
+            if key in self.data and self.data[key] != fh.read():
+                raise b.BackupError("verify failed: checksum mismatch")
+
+
+class NativeRetryTests(RunFixture):
+    def setUp(self):
+        super().setUp()
+        self.dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        self.key = b.db_key_for(self.dump)
+        self.old = objs_for([T(2026, 11, 1, 4) - dt.timedelta(days=i) for i in range(20)], 50)
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 3, 0, 0
+        self.cfg.max_deletes = 2
+
+    def test_same_day_retry_requires_native_verification(self):
+        instance = b.Obj("instance/2026/11/02/paperclip-instance-20261102-040000.tar.gz", 10)
+        rc = NativeIntegrityRclone(self.old + [instance], fail_verify=True)
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertIn(self.key, rc.store)  # upload succeeded before verify failed
+        self.assertEqual(rc.deleted, [])
+        uploaded = list(rc.uploaded)
+        rc.verified.clear()
+
+        self.assertEqual(b.run(self.cfg, rc, self.now + dt.timedelta(minutes=5)), b.EXIT_ERROR)
+        self.assertEqual(rc.verified, [self.key])
+        self.assertEqual(rc.uploaded, uploaded)
+        self.assertEqual(rc.deleted, [])
+        self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
+        self.assertEqual(rc.puts[b.STATUS_KEY]["exit_code"], b.EXIT_ERROR)
+
+        rc.fail_verify = False
+        rc.verified.clear()
+        self.assertEqual(b.run(self.cfg, rc, self.now + dt.timedelta(minutes=10)), b.EXIT_OK)
+        self.assertEqual(rc.verified[0], self.key)
+        self.assertEqual(rc.uploaded.count(self.key), 1)  # verified without reuploading
+        self.assertTrue(rc.puts[b.STATUS_KEY]["ok"])
+        self.assertEqual(len(rc.deleted), self.cfg.max_deletes)
+
+    def test_damaged_and_wrong_size_leftovers_block_success_and_retention(self):
+        for damage in ("checksum", "size"):
+            with self.subTest(damage=damage):
+                rc = NativeIntegrityRclone(self.old, fail_verify=True)
+                self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+                data = rc.data[self.key]
+                rc.data[self.key] = bytes([data[0] ^ 1]) + data[1:] if damage == "checksum" else data[:-1]
+                rc.store[self.key] = len(rc.data[self.key])
+                rc.fail_verify = False
+                rc.verified.clear()
+                uploaded = list(rc.uploaded)
+
+                self.assertEqual(b.run(self.cfg, rc, self.now + dt.timedelta(minutes=5)), b.EXIT_ERROR)
+                self.assertEqual(rc.verified, [self.key])
+                self.assertEqual(rc.uploaded, uploaded)
+                self.assertEqual(rc.deleted, [])
+                self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
+                self.assertIn(damage, rc.puts[b.STATUS_KEY]["error"])
+
+    def test_different_same_day_key_requires_upload_and_verification(self):
+        rc = NativeIntegrityRclone(self.old + objs_for([T(2026, 11, 2, 0)]))
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_OK)
+        self.assertIn(self.key, rc.uploaded)
+        self.assertIn(self.key, rc.verified)
+        self.assertTrue(rc.puts[b.STATUS_KEY]["ok"])
+
+    def test_cap_retry_verifies_native_before_any_pruning(self):
+        rc = NativeIntegrityRclone(self.old, fail_verify=True)
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.cfg.cap_bytes = 1
+        rc.verified.clear()
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertEqual(rc.verified, [self.key])
+        self.assertEqual(rc.deleted, [])
+        self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
+
+        rc.fail_verify = False
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
+        self.assertEqual(len(rc.deleted), self.cfg.max_deletes)
+        self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
+
+    def test_cap_without_verified_native_never_prunes(self):
+        self.cfg.cap_bytes = 1
+        for same_day in ([], objs_for([T(2026, 11, 2, 0)])):
+            with self.subTest(same_day=bool(same_day)):
+                rc = NativeIntegrityRclone(self.old + same_day)
+                self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
+                self.assertEqual(rc.verified, [])
+                self.assertEqual(rc.uploaded, [])
+                self.assertEqual(rc.deleted, [])
+                self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
+
+    def test_real_verifier_rejects_size_and_checksum_failures(self):
+        from unittest import mock
+        rc = b.Rclone("fixture", binary="/nonexistent/rclone")
+        size = os.path.getsize(self.dump)
+        with mock.patch.object(rc, "_run", return_value=json.dumps([{"Size": size - 1}])) as run:
+            with self.assertRaisesRegex(b.BackupError, "size mismatch"):
+                rc.verify(self.dump, self.key)
+            self.assertEqual(run.call_count, 1)
+
+        listing = json.dumps([{"Size": size}])
+        with mock.patch.object(rc, "_run", side_effect=[listing, b.BackupError("rclone check failed")]) as run:
+            with self.assertRaisesRegex(b.BackupError, "check failed"):
+                rc.verify(self.dump, self.key)
+            self.assertEqual(run.call_args.args[0], [
+                "check", "--one-way", "--include", "/" + os.path.basename(self.dump),
+                self.backups, rc._target(self.key.rsplit("/", 1)[0])])
+
+        with mock.patch.object(rc, "_run", side_effect=[listing, ""]) as run:
+            rc.verify(self.dump, self.key)
+            self.assertEqual(run.call_count, 2)
+
+    def test_dry_run_does_not_verify_existing_native(self):
+        rc = NativeIntegrityRclone()
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_OK)
+        rc.verified.clear()
+        uploaded, deleted, puts = list(rc.uploaded), list(rc.deleted), dict(rc.puts)
+        self.assertEqual(b.run(self.cfg, rc, self.now, dry_run=True), b.EXIT_OK)
+        self.assertEqual(rc.verified, [])
+        self.assertEqual((rc.uploaded, rc.deleted, rc.puts), (uploaded, deleted, puts))
+
+
 class ClockSanityTests(RunFixture):
     def pruned_store(self, n=41, size=10):
         # steady state: n db objects, one per day ending the day before now
@@ -497,12 +634,18 @@ class CapProjectionTests(RunFixture):
         self.assertEqual(b.run(self.cfg, rc, self.now), 2)
         self.assertEqual(rc.uploaded, [])
 
-    def test_cap_breach_still_prunes_out_of_window_objects(self):
+    def test_cap_breach_still_prunes_after_native_verification(self):
         self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 3, 0, 0
         self.cfg.max_deletes = 2
         self.cfg.cap_bytes = 100
-        rc = FakeRclone(objs_for([T(2026, 11, 1, 4) - dt.timedelta(days=i) for i in range(20)], 50))
+        rc = NativeIntegrityRclone(objs_for(
+            [T(2026, 11, 1, 4) - dt.timedelta(days=i) for i in range(20)], 50))
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        key = b.db_key_for(dump)
+        rc.upload(dump, key)
+        rc.uploaded.clear()
         self.assertEqual(b.run(self.cfg, rc, self.now), 2)
+        self.assertEqual(rc.verified, [key])
         self.assertEqual(len(rc.deleted), 2)
         self.assertEqual(rc.uploaded, [])
 

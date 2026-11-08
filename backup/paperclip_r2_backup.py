@@ -518,15 +518,22 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         dump_key = db_key_for(dump)
         dump_ts = key_timestamp(dump_key)
         check_dump_fresh(dump, dump_ts, now)
-        dump_day = dump_ts.date()
         retention_block = ""
         prev_newest = newest_ts(existing[DB_PREFIX])
         if prev_newest is not None and \
                 (dump_ts - prev_newest).total_seconds() > MAX_FORWARD_JUMP_SECONDS:
             retention_block = ("retention skipped: newest dump is more than 3 days "
                                "after the previous newest remote object (clock jump?)")
-        if day_has_object(existing[DB_PREFIX], dump_day):
-            log(f"db: object for {dump_day} already present, nothing to upload")
+        native_verified = False
+        if any(o.key == dump_key for o in existing[DB_PREFIX]):
+            # A prior upload may have succeeded before verification failed. Only
+            # the exact local dump can substantiate this object's integrity.
+            if dry_run:
+                log(f"dry-run: would verify existing {dump_key}")
+            else:
+                log(f"verify existing {dump_key}")
+                rc.verify(dump, dump_key)
+                native_verified = True
         else:
             planned.append((dump, dump_key))
 
@@ -606,9 +613,9 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                                "nothing uploaded")
             log(status["error"])
             code = EXIT_CAP
-            # Retention alone may still bring usage back under the cap over several
-            # runs: prune what GFS drops anyway (newest objects stay fresh and kept).
-            if not retention_block:
+            # Cap-only pruning still needs a verified native backup. When this
+            # dump is not offsite yet, admission cannot establish its integrity.
+            if not retention_block and (native_verified or dry_run):
                 try:
                     apply_retention(compute_retention(cfg, existing, now, True),
                                     rc, status, dry_run)

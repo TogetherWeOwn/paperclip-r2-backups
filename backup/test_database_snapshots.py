@@ -378,18 +378,30 @@ class BackupSnapshotTests(RunFixture):
 
     def test_same_day_retry_recaptures_and_verifies_after_failed_verification(self):
         self.configure()
-        rc = FakeRclone(fail_verify=True)
-        with mock.patch.object(s, "capture", side_effect=self.capture) as capture:
+        rc = FakeRclone()
+
+        def verify(local, key):
+            # Keep native verification healthy so this test reaches the
+            # supplemental retry path rather than stopping at the native gate.
+            if key.startswith(s.PREFIXES):
+                raise b.BackupError("snapshot verify failed")
+
+        with mock.patch.object(rc, "verify", side_effect=verify) as verification, \
+                mock.patch.object(s, "capture", side_effect=self.capture) as capture:
             self.assertEqual(b.run(self.cfg, rc, self.now), 1)
             # Simulate the snapshot object left behind by a failed verify. Merely
             # seeing this key must not let the retry bypass capture/verification.
             for src in self.cfg.sources:
                 rc.store[s.timing_key(src.name, self.now)] = 1
             capture.reset_mock()
+            verification.reset_mock()
             later = self.now + dt.timedelta(minutes=5)
             with mock.patch.object(s, "utc_now", return_value=later):
                 self.assertEqual(b.run(self.cfg, rc, later), 1)
             self.assertEqual(capture.call_count, 2)
+            self.assertTrue(verification.call_args_list[0].args[1].startswith(b.DB_PREFIX))
+            self.assertTrue(any(call.args[1].startswith(s.PREFIXES)
+                                for call in verification.call_args_list))
         self.assertEqual(rc.deleted, [])
         self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
 
