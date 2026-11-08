@@ -20,7 +20,7 @@ import time
 import uuid
 
 import database_snapshots as snapshots
-from operation_lock import LockError, operation_lock
+from operation_lock import LockError, fsync_directory, operation_lock
 
 
 class MeasurementError(Exception):
@@ -110,11 +110,29 @@ def revision():
     return {"algorithm": "sha256-source-set-v1", "digest": digest, "files": hashes}
 
 
+@contextlib.contextmanager
+def defer_cancellation():
+    # Defer Python handlers, not the OS signal mask: children must not inherit a
+    # blocked TERM/INT mask. Deliver cancellation after ownership is registered.
+    pending = []
+    def defer(signum, frame):
+        pending.append(signum)
+    previous = {sig: signal.signal(sig, defer) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        if pending:
+            signal.raise_signal(pending[0])
+
+
 class CaptureClient:
     """Own libpq client process groups; never claim this proves backend exit."""
     def __init__(self, envelope):
         self.envelope = envelope
         self.processes = []
+        self.ownership_uncertain = False
 
     def popen(self, args, **kwargs):
         self.envelope.remaining()
@@ -125,8 +143,11 @@ class CaptureClient:
         kwargs["env"] = {k: v for k, v in snapshots.child_env().items()
                          if k not in ("HOME", "PGSYSCONFDIR")}
         kwargs["env"]["PGSERVICE"] = self.source.service
-        proc = subprocess.Popen(args, start_new_session=True, **kwargs)
-        self.processes.append(proc)
+        with defer_cancellation():
+            self.ownership_uncertain = True
+            proc = subprocess.Popen(args, start_new_session=True, **kwargs)
+            self.processes.append(proc)
+            self.ownership_uncertain = False
         return proc
 
     def stop(self, proc):
@@ -154,7 +175,7 @@ class CaptureClient:
                 self.stop(proc)
             except Exception:
                 failures.append(proc)
-        if failures:
+        if failures or self.ownership_uncertain:
             raise MeasurementError("client termination reconciliation failed")
 
     def execute(self, args, *, data=None, output=None, env=None):
@@ -209,7 +230,9 @@ def remove_owned_scratch(root, identity):
         raise MeasurementError("unexpected scratch entries; authorized cleanup required")
     for path in entries:
         path.unlink()
+    fsync_directory(root)
     root.rmdir()
+    fsync_directory(root.parent)
     if root.exists():
         raise MeasurementError("plaintext cleanup not verified")
 

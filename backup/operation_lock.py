@@ -2,11 +2,20 @@
 import contextlib
 import fcntl
 import os
+from pathlib import Path
 import stat
 
 
 class LockError(Exception):
     pass
+
+
+def fsync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 class Lease:
@@ -19,8 +28,12 @@ class Lease:
 
     def reconcile(self):
         # Only the measurement owner, after verified client/plaintext cleanup.
-        os.ftruncate(self.fd, 0)
-        os.fsync(self.fd)
+        try:
+            os.ftruncate(self.fd, 0)
+            os.fsync(self.fd)
+        except OSError:
+            self.mark_cleanup_pending()
+            raise
 
 
 @contextlib.contextmanager
@@ -37,6 +50,8 @@ def operation_lock(path):
             raise LockError("another backup/restore drill/measurement is running") from None
         if os.fstat(fd).st_size:
             raise LockError("operation lock requires authorized residual cleanup reconciliation")
+        # A newly created lock pathname must survive before any capture starts.
+        fsync_directory(Path(path).parent)
         yield Lease(fd)
     finally:
         os.close(fd)

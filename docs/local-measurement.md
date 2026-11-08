@@ -85,6 +85,13 @@ tar without extracting another plaintext dump. No restore container is created.
 The revised backup, drill and measurement paths share a nonblocking `flock` at
 `BACKUP_TMP_DIR/operation.lock`. Measurement creates a fresh private run directory
 only after locking and writes/fsyncs a cleanup-pending latch **before** capture.
+The lock directory entry is fsynced before capture. Plaintext unlink and run-directory
+removal are directory-fsynced, including the scratch parent, before the latch is
+cleared. Unsupported/failed directory fsync fails closed, including across separate
+lock/scratch filesystems; no filesystem-independent host-loss guarantee is implied.
+Client spawning and ownership registration defer TERM/INT handlers until the child
+is registered, without passing a blocked signal mask to children. An uncertain
+spawn prevents reconciliation even if no process handle was returned.
 The process owns its snapshot session and client process groups. SIGTERM/SIGINT
 unwind the snapshot, terminate/reap clients and remove only verified run-owned
 regular files and that exact run directory. Cleanup is not recursive and never

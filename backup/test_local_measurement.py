@@ -263,6 +263,80 @@ class MeasurementTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", json.dumps(spawn.call_args.kwargs["env"]))
         self.assertTrue(spawn.call_args.kwargs["start_new_session"])
 
+    def test_cancellation_during_spawn_and_registration_keeps_client_owned(self):
+        for phase, sig in (("spawn", signal.SIGTERM), ("register", signal.SIGINT)):
+            client = m.CaptureClient(self.envelope)
+            client.source = m.load_source("hindsight", self.env)
+            proc = mock.Mock(pid=12345, stdin=None, stdout=None, stderr=None)
+            class Registry(list):
+                def append(self, value):
+                    if phase == "register":
+                        signal.raise_signal(sig)
+                    super().append(value)
+            client.processes = Registry()
+            def spawn(*args, **kwargs):
+                if phase == "spawn":
+                    signal.raise_signal(sig)
+                return proc
+            with self.subTest(phase=phase), m.cancellation(), \
+                    mock.patch.object(subprocess, "Popen", side_effect=spawn):
+                with self.assertRaisesRegex(m.MeasurementError, "cancelled"):
+                    client.popen(["psql"])
+            self.assertEqual(client.processes, [proc])
+            with mock.patch.object(os, "killpg", side_effect=(None, ProcessLookupError)):
+                client.close()
+            self.assertEqual(client.processes, [])
+
+    def test_uncertain_spawn_never_claims_client_reconciliation(self):
+        client = m.CaptureClient(self.envelope)
+        client.source = m.load_source("hindsight", self.env)
+        with mock.patch.object(subprocess, "Popen", side_effect=OSError):
+            with self.assertRaises(OSError):
+                client.popen(["psql"])
+        with self.assertRaisesRegex(m.MeasurementError, "termination reconciliation"):
+            client.close()
+
+    def test_cleanup_durability_precedes_latch_clear(self):
+        import operation_lock as locks
+        events = []
+        def sync(path):
+            path = Path(path)
+            events.append(path.name)
+            if path.name.startswith("local-measurement-"):
+                self.assertFalse(list(path.iterdir()))
+            if path.name == "scratch":
+                self.assertFalse(list(path.iterdir()))
+        reconcile = locks.Lease.reconcile
+        def clear(lease):
+            events.append("clear")
+            reconcile(lease)
+        with self.admitted_fixture(), \
+                mock.patch.object(locks, "fsync_directory", side_effect=sync), \
+                mock.patch.object(m, "fsync_directory", side_effect=sync), \
+                mock.patch.object(locks.Lease, "reconcile", clear):
+            self.assertEqual(b.main(self.args), 0)
+        self.assertEqual(events[0], "lock")
+        self.assertTrue(events[1].startswith("local-measurement-"))
+        self.assertEqual(events[2:], ["scratch", "clear"])
+
+    def test_failed_latch_clear_rearms_marker(self):
+        import operation_lock as locks
+        path = self.root / "lock" / "operation.lock"
+        with operation_lock(path) as lease:
+            lease.mark_cleanup_pending()
+            with mock.patch.object(locks.os, "fsync", side_effect=(OSError, None)):
+                with self.assertRaises(OSError):
+                    lease.reconcile()
+            self.assertGreater(path.stat().st_size, 0)
+
+    def test_cleanup_directory_fsync_failure_retains_latch(self):
+        with self.admitted_fixture(), mock.patch.object(m, "fsync_directory", side_effect=OSError):
+            self.assertEqual(b.main(self.args), 1)
+        self.assertEqual(self.receipt()["cleanup"], "failed_requires_authorized_reconciliation")
+        with self.assertRaisesRegex(LockError, "reconciliation"):
+            with operation_lock(self.root / "lock" / "operation.lock"):
+                self.fail("undurable cleanup admitted")
+
     def test_session_cleanup_failure_is_retained_for_outer_reconciliation(self):
         client = m.CaptureClient(self.envelope)
         proc = mock.Mock(pid=12345, stdin=None, stdout=None, stderr=None)
