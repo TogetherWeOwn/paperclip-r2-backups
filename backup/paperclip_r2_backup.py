@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import datetime as dt
 import gzip
-import fcntl
 import signal
 import json
 import os
@@ -25,6 +24,7 @@ import tempfile
 from dataclasses import dataclass, field
 
 import database_snapshots as snapshots
+from operation_lock import LockError, operation_lock
 
 REMOTE = "R2"
 DB_PREFIX = "db/"
@@ -756,6 +756,10 @@ def _ensure_dir(path: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if "--measure-local" in argv:
+        # Separate capability boundary: never load legacy config or construct Rclone.
+        import local_measurement
+        return local_measurement.main(argv)
     dry_run = "--dry-run" in argv
     if any(a not in ("--dry-run", "--restore-drill") for a in argv) or len(argv) > 1:
         print("usage: paperclip_r2_backup.py [--dry-run | --restore-drill]", file=sys.stderr)
@@ -774,18 +778,14 @@ def main(argv: list[str] | None = None) -> int:
         if dry_run:
             return run(cfg, rc, now, True)
         # Shared lock protects retention/download and prevents overlapping source dumps.
-        with open(os.path.join(_ensure_dir(cfg.tmp_dir), "operation.lock"), "a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise BackupError("another backup/restore drill is running") from None
+        with operation_lock(os.path.join(_ensure_dir(cfg.tmp_dir), "operation.lock")):
             if "--restore-drill" in argv:
                 return snapshots.drill(cfg, rc, now)
             code = run(cfg, rc, now)
             if code == EXIT_OK and cfg.sources and now.weekday() == cfg.restore_weekday:
                 return snapshots.drill(cfg, rc, dt.datetime.now(dt.timezone.utc))
             return code
-    except (BackupError, snapshots.SnapshotError) as exc:
+    except (BackupError, snapshots.SnapshotError, LockError) as exc:
         log(f"error: {exc}")
         return EXIT_ERROR
 

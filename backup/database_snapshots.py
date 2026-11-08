@@ -160,14 +160,14 @@ def load_sources(env):
     return tuple(sources)
 
 
-def validate_source(source):
+def validate_source(source, *, require_restore_image=True):
     if source.name not in ("paperclip", "hindsight"):
         raise SnapshotError("unknown database source")
     parts = source.head_table.split(".")
     if (len(parts) != 2 or not source.head_columns or
             any(not IDENT.fullmatch(p) for p in (*parts, *source.head_columns))):
         raise SnapshotError("invalid schema-head identifiers")
-    if not IMAGE.fullmatch(source.image):
+    if require_restore_image and not IMAGE.fullmatch(source.image):
         raise SnapshotError(source.name + ": restore image must be pinned by sha256")
     if bool(source.container) == bool(source.service):
         raise SnapshotError(source.name + ": configure exactly one container or libpq service")
@@ -222,7 +222,7 @@ def quote(identifier):
     return '"' + identifier.replace('"', '""') + '"'
 
 
-def metadata(source, snapshot=None):
+def metadata(source, snapshot=None, *, query=None):
     begin = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
     if snapshot:
         if not re.fullmatch(r"[0-9A-Fa-f-]+", snapshot):
@@ -243,7 +243,7 @@ ORDER BY n.nspname, c.relname
     text += ("SELECT json_build_object('schema_head', coalesce(jsonb_agg(to_jsonb(h) "
              "ORDER BY to_jsonb(h)::text), '[]'::jsonb)) FROM (SELECT " + columns +
              " FROM " + table + ") h;\nCOMMIT;\n")
-    lines = [json.loads(line) for line in sql(source, text).splitlines() if line]
+    lines = [json.loads(line) for line in (query or sql)(source, text).splitlines() if line]
     tables = [line for line in lines if "table" in line]
     counts = {line["table"]: line["count"] for line in tables}
     if len(counts) != len(tables):
@@ -255,11 +255,12 @@ ORDER BY n.nspname, c.relname
 
 
 @contextlib.contextmanager
-def exported_snapshot(source):
+def exported_snapshot(source, *, client=None):
     try:
-        proc = subprocess.Popen(command(source, "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"),
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, env=child_env(source))
+        spawn = client.popen if client else subprocess.Popen
+        proc = spawn(command(source, "psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1"),
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                     stderr=subprocess.DEVNULL, env=child_env(source))
     except OSError:
         raise SnapshotError("snapshot client unavailable") from None
     try:
@@ -278,13 +279,16 @@ def exported_snapshot(source):
             raise SnapshotError("source snapshot session ended early")
     finally:
         # Closing the owning session releases the exported snapshot on every path.
-        proc.stdin.close()
-        try:
-            proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
-        proc.stdout.close()
+        if client:
+            client.stop(proc)
+        else:
+            proc.stdin.close()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            proc.stdout.close()
 
 
 def sha256(path):
@@ -295,8 +299,8 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def capture(source, now, dest):
-    validate_source(source)
+def capture(source, now, dest, *, client=None):
+    validate_source(source, require_restore_image=False)
     dump = os.path.join(dest, source.name + ".dump")
     # Bracket connection + export, NOT invocation or dump completion. The first
     # server snapshot acquisition is inside this interval, even with slow startup.
@@ -304,13 +308,16 @@ def capture(source, now, dest):
     if lower < now:
         raise SnapshotError("snapshot clock moved backward since invocation")
     # Both consumers import the SAME snapshot while its owner remains connected.
-    with exported_snapshot(source) as snapshot:
+    owner = exported_snapshot(source, client=client) if client else exported_snapshot(source)
+    with owner as snapshot:
         upper, end_tick = utc_now(), time.monotonic()
         check_clock(lower, start_tick, upper, end_tick)
-        expected = metadata(source, snapshot)
+        expected = (metadata(source, snapshot, query=client.sql) if client
+                    else metadata(source, snapshot))
         with open(dump, "wb") as stream:
-            execute(command(source, "pg_dump", "-Fc", "--no-owner", "--no-acl",
-                            "--snapshot=" + snapshot), output=stream, env=child_env(source))
+            (client.execute if client else execute)(
+                command(source, "pg_dump", "-Fc", "--no-owner", "--no-acl",
+                        "--snapshot=" + snapshot), output=stream, env=child_env(source))
     if os.path.getsize(dump) == 0:
         raise SnapshotError("empty database dump")
     manifest = {"version": 2, "database": source.name,
@@ -333,12 +340,13 @@ def capture(source, now, dest):
     return path, key
 
 
-def unpack(path, dest, source):
+def unpack(path, dest, source, *, verify_only=False):
     # Read exactly two fixed-size headers ourselves. TarFile.next/getmembers can
     # expand arbitrarily large PAX/GNU metadata before exposing a member to validate.
     dump = os.path.join(dest, "dump.pgcustom")
     allowed = {"dump.pgcustom", "manifest.json"}
     seen = set()
+    digest = hashlib.sha256()
     size = os.path.getsize(path)
     with open(path, "rb") as stream:
         for _ in range(2):
@@ -356,13 +364,16 @@ def unpack(path, dest, source):
             if member.name == "manifest.json":
                 manifest = json.loads(stream.read(member.size))
             else:
-                with open(dump, "wb") as output:
+                target = contextlib.nullcontext() if verify_only else open(dump, "wb")
+                with target as output:
                     remaining = member.size
                     while remaining:
                         chunk = stream.read(min(remaining, 1024**2))
                         if not chunk:
                             raise SnapshotError("truncated snapshot bundle")
-                        output.write(chunk)
+                        digest.update(chunk)
+                        if output is not None:
+                            output.write(chunk)
                         remaining -= len(chunk)
             padding = (-member.size) % 512
             if stream.read(padding) != b"\0" * padding:
@@ -378,11 +389,11 @@ def unpack(path, dest, source):
             manifest.get("head_table") != source.head_table or
             manifest.get("head_columns") != list(source.head_columns) or
             not manifest.get("schema_head") or not manifest.get("counts") or
-            manifest.get("dump_sha256") != sha256(dump)):
+            manifest.get("dump_sha256") != digest.hexdigest()):
         raise SnapshotError("snapshot manifest/hash mismatch")
     if manifest["version"] == 2:
         validate_timing(manifest)
-    return dump, manifest
+    return (None if verify_only else dump), manifest
 
 
 @contextlib.contextmanager
