@@ -25,7 +25,87 @@ TIMEOUT = 3600
 MANIFEST_LIMIT = 4 * 1024**2
 IDENT = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 IMAGE = re.compile(r"^[a-zA-Z0-9./:_-]+@sha256:[0-9a-f]{64}$")
-BUNDLE = re.compile(r"^(paperclip|hindsight)/\d{4}/\d{2}/\d{2}/\1-\d{8}-\d{6}\.tar$")
+BUNDLE = re.compile(r"^(paperclip|hindsight)/\d{4}/\d{2}/\d{2}/\1-\d{8}-\d{6}(?:-snapshot)?\.tar$")
+TIMED_BUNDLE = re.compile(r"^(paperclip|hindsight)/\d{4}/\d{2}/\d{2}/\1-\d{8}-\d{6}-snapshot\.tar$")
+UTC_INSTANT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
+CLOCK = "host-utc-bracket-v1"
+
+
+def utc_now():
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def instant(value):
+    if not isinstance(value, str) or not UTC_INSTANT.fullmatch(value):
+        raise SnapshotError("invalid snapshot acquisition instant")
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        raise SnapshotError("invalid snapshot acquisition instant") from None
+
+
+def timestamp(value):
+    if value.tzinfo is None or value.utcoffset() != dt.timedelta(0):
+        raise SnapshotError("snapshot clock must be UTC")
+    return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def check_clock(start, start_tick, end, end_tick):
+    timestamp(start)
+    timestamp(end)
+    elapsed = (end - start).total_seconds()
+    # Detect backward clocks and observable wall/monotonic steps. This does not
+    # prove UTC accuracy: the host must have a synchronized, stable clock.
+    if elapsed < 0 or end_tick < start_tick or abs(elapsed - (end_tick - start_tick)) > 1:
+        raise SnapshotError("snapshot clock moved backward or stepped")
+
+
+def timing_key(source, lower):
+    return f"{source}/{lower:%Y/%m/%d}/{source}-{lower:%Y%m%d-%H%M%S}-snapshot.tar"
+
+
+def key_lower_bound(key):
+    if not TIMED_BUNDLE.fullmatch(key):
+        raise SnapshotError("legacy snapshot timing is uncertain")
+    try:
+        lower = dt.datetime.strptime(key.rsplit("/", 1)[1].split("-", 1)[1],
+                                     "%Y%m%d-%H%M%S-snapshot.tar").replace(tzinfo=dt.timezone.utc)
+    except ValueError:
+        raise SnapshotError("invalid snapshot key date") from None
+    if timing_key(key.split("/", 1)[0], lower) != key:
+        raise SnapshotError("snapshot key date mismatch")
+    return lower
+
+
+def validate_timing(manifest, key=None):
+    if manifest.get("version") != 2:
+        raise SnapshotError("legacy snapshot timing is uncertain; no pre-incident guarantee")
+    timing = manifest.get("snapshot_acquisition")
+    if not isinstance(timing, dict) or timing.get("clock") != CLOCK:
+        raise SnapshotError("invalid snapshot acquisition interval")
+    lower, upper = (instant(timing.get(k)) for k in ("not_before", "not_after"))
+    if upper < lower or manifest.get("timestamp") != timestamp(lower):
+        raise SnapshotError("invalid snapshot acquisition interval")
+    if key is not None:
+        key_lower_bound(key)
+        if timing_key(manifest.get("database"), lower) != key:
+            raise SnapshotError("snapshot key/manifest timing mismatch")
+    return lower, upper
+
+
+def require_preincident(manifest, key, cutoff):
+    timestamp(cutoff)
+    lower, upper = validate_timing(manifest, key)
+    if upper >= cutoff:
+        raise SnapshotError("snapshot is not provably before incident cutoff")
+    return lower, upper
+
+
+def require_fresh(manifest, key, now):
+    lower, upper = validate_timing(manifest, key)
+    if now < upper or not 0 <= (now - lower).total_seconds() < 26 * 3600:
+        raise SnapshotError("offsite snapshot is not fresh (<26h) or clock moved backward")
+    return lower, upper
 
 
 class SnapshotError(Exception):
@@ -205,16 +285,25 @@ def sha256(path):
 def capture(source, now, dest):
     validate_source(source)
     dump = os.path.join(dest, source.name + ".dump")
+    # Bracket connection + export, NOT invocation or dump completion. The first
+    # server snapshot acquisition is inside this interval, even with slow startup.
+    lower, start_tick = utc_now(), time.monotonic()
+    if lower < now:
+        raise SnapshotError("snapshot clock moved backward since invocation")
     # Both consumers import the SAME snapshot while its owner remains connected.
     with exported_snapshot(source) as snapshot:
+        upper, end_tick = utc_now(), time.monotonic()
+        check_clock(lower, start_tick, upper, end_tick)
         expected = metadata(source, snapshot)
         with open(dump, "wb") as stream:
             execute(command(source, "pg_dump", "-Fc", "--no-owner", "--no-acl",
                             "--snapshot=" + snapshot), output=stream, env=child_env(source))
     if os.path.getsize(dump) == 0:
         raise SnapshotError("empty database dump")
-    manifest = {"version": 1, "database": source.name,
-                "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    manifest = {"version": 2, "database": source.name,
+                "timestamp": timestamp(lower),
+                "snapshot_acquisition": {"not_before": timestamp(lower),
+                                         "not_after": timestamp(upper), "clock": CLOCK},
                 "dump_sha256": sha256(dump), "head_table": source.head_table,
                 "head_columns": list(source.head_columns), **expected}
     encoded = json.dumps(manifest, sort_keys=True).encode()
@@ -223,11 +312,12 @@ def capture(source, now, dest):
     manifest_path = os.path.join(dest, source.name + ".json")
     with open(manifest_path, "wb") as stream:
         stream.write(encoded)
-    path = os.path.join(dest, f"{source.name}-{now:%Y%m%d-%H%M%S}.tar")
+    key = timing_key(source.name, lower)
+    path = os.path.join(dest, os.path.basename(key))
     with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as archive:
         archive.add(dump, arcname="dump.pgcustom")
         archive.add(manifest_path, arcname="manifest.json")
-    return path, f"{source.prefix}{now:%Y/%m/%d}/{os.path.basename(path)}"
+    return path, key
 
 
 def unpack(path, dest, source):
@@ -271,12 +361,14 @@ def unpack(path, dest, source):
         for chunk in iter(lambda: stream.read(1024**2), b""):
             if chunk.strip(b"\0"):
                 raise SnapshotError("invalid snapshot bundle trailer")
-    if (manifest.get("version") != 1 or manifest.get("database") != source.name or
+    if (manifest.get("version") not in (1, 2) or manifest.get("database") != source.name or
             manifest.get("head_table") != source.head_table or
             manifest.get("head_columns") != list(source.head_columns) or
             not manifest.get("schema_head") or not manifest.get("counts") or
             manifest.get("dump_sha256") != sha256(dump)):
         raise SnapshotError("snapshot manifest/hash mismatch")
+    if manifest["version"] == 2:
+        validate_timing(manifest)
     return dump, manifest
 
 
@@ -338,18 +430,24 @@ def restore_and_compare(source, dump, manifest):
 
 
 def drill(cfg, rc, now):
+    clock_start = utc_now()
+    start_tick = time.monotonic()
+    checked = []
     receipt = {"timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "ok": False,
                "databases": {}, "error": None}
     try:
         if {s.name for s in cfg.sources} != {"paperclip", "hindsight"}:
             raise SnapshotError("restore drill requires both database sources")
         for source in cfg.sources:
-            candidates = [o for o in rc.list(source.prefix) if BUNDLE.fullmatch(o.key)]
+            candidates = [o for o in rc.list(source.prefix) if TIMED_BUNDLE.fullmatch(o.key)]
             if not candidates:
-                raise SnapshotError(source.name + ": no offsite snapshot")
-            obj = max(candidates, key=lambda o: o.key)
-            stamp = dt.datetime.strptime(obj.key[-19:-4], "%Y%m%d-%H%M%S").replace(tzinfo=dt.timezone.utc)
-            if not 0 <= (now - stamp).total_seconds() < 26 * 3600:
+                raise SnapshotError(source.name + ": no offsite snapshot with substantiated timing")
+            obj = max(candidates, key=lambda o: (key_lower_bound(o.key), o.key))
+            # Reject obviously stale keys before download; the validated manifest
+            # interval, not the key alone, governs eligibility after download.
+            observed = utc_now()
+            check_clock(clock_start, start_tick, observed, time.monotonic())
+            if observed < now or not 0 <= (observed - key_lower_bound(obj.key)).total_seconds() < 26 * 3600:
                 raise SnapshotError(source.name + ": newest offsite snapshot is not fresh (<26h)")
             if not 0 < obj.size <= cfg.cap_bytes:
                 raise SnapshotError("offsite snapshot exceeds download cap")
@@ -359,13 +457,20 @@ def drill(cfg, rc, now):
                 if os.path.getsize(path) != obj.size:
                     raise SnapshotError("offsite download size mismatch")
                 dump, manifest = unpack(path, dest, source)
-                if manifest["timestamp"] != stamp.strftime("%Y-%m-%dT%H:%M:%SZ"):
-                    raise SnapshotError("snapshot timestamp mismatch")
+                require_fresh(manifest, obj.key, observed)
                 actual = restore_and_compare(source, dump, manifest)
+                checked.append((manifest, obj.key))
                 receipt["databases"][source.name] = {
                     "object_key": obj.key, "object_sha256": sha256(path),
                     "dump_sha256": manifest["dump_sha256"], "source_timestamp": manifest["timestamp"],
+                    "snapshot_acquisition": manifest["snapshot_acquisition"],
                     "restore_image": source.image, "cleanup_ok": True, **actual}
+        finished = utc_now()
+        if finished < observed:
+            raise SnapshotError("snapshot clock moved backward during restore")
+        check_clock(clock_start, start_tick, finished, time.monotonic())
+        for manifest, key in checked:
+            require_fresh(manifest, key, finished)
         receipt["ok"] = True
     except Exception as exc:
         # Only our deliberately safe errors are reportable; raw client, parse and

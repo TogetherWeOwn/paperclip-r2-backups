@@ -39,7 +39,7 @@ jobs:
   restore-fixtures:
     name: Offsite restore fixtures
     needs: changes
-    if: needs.changes.outputs.full_run == 'true' || (fromJSON(needs.changes.outputs.areas).backup && (github.event_name != 'pull_request' || github.event.pull_request.draft == false))
+    if: needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).backup
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:

@@ -122,6 +122,11 @@ INSERT INTO "a.b".c VALUES (1), (2);
             receipt = json.load(stream)
         assert receipt["ok"] and set(receipt["databases"]) == {"paperclip", "hindsight"}
         for database in receipt["databases"].values():
+            timing = database["snapshot_acquisition"]
+            lower, upper = (s.instant(timing[k]) for k in ("not_before", "not_after"))
+            assert now <= lower <= upper <= s.utc_now()
+            assert database["source_timestamp"] == s.timestamp(lower)
+            assert s.key_lower_bound(database["object_key"]) == lower.replace(microsecond=0)
             assert database["counts"]["public.items"] == 7
             assert database["cleanup_ok"]
             assert database["counts"]["pgmq.queue"] == 1

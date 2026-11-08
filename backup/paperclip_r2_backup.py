@@ -295,9 +295,14 @@ def plan_retention(objs: list[Obj], now: dt.datetime, retention: tuple[int, int,
     for o in objs:
         if not o.key.startswith(prefix):
             raise BackupError("object outside prefix passed to retention")
-        if prefix in snapshots.PREFIXES and not snapshots.BUNDLE.fullmatch(o.key):
-            continue
-        ts = key_timestamp(o.key)
+        if prefix in snapshots.PREFIXES:
+            # Invocation-dated legacy bundles have unknown acquisition time. Keep
+            # them untouched; only the distinct timed format participates in GFS.
+            if not snapshots.TIMED_BUNDLE.fullmatch(o.key):
+                continue
+            ts = snapshots.key_lower_bound(o.key)
+        else:
+            ts = key_timestamp(o.key)
         if ts is not None:  # unparseable keys are never touched
             items.append((o.key, ts))
     plan = RetentionPlan(kept=len(items))
@@ -496,6 +501,8 @@ def check_dump_fresh(dump: str, dump_ts: dt.datetime, now: dt.datetime) -> None:
 
 def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
     now = now.astimezone(dt.timezone.utc)
+    clock_start = snapshots.utc_now() if cfg.sources and not dry_run else now
+    start_tick = snapshots.time.monotonic()
     status = {
         "timestamp": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "ok": False, "error": None, "exit_code": EXIT_ERROR, "dry_run": dry_run,
@@ -532,8 +539,8 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
 
         # Snapshot-bound supplemental DB bundles. Native Paperclip SQL is unchanged.
         for source in cfg.sources:
-            source_objects = [o for o in existing[source.prefix] if snapshots.BUNDLE.fullmatch(o.key)]
-            prior = newest_ts(source_objects)
+            source_objects = [o for o in existing[source.prefix] if snapshots.TIMED_BUNDLE.fullmatch(o.key)]
+            prior = max((snapshots.key_lower_bound(o.key) for o in source_objects), default=None)
             if prior and (prior - now).total_seconds() > FUTURE_SKEW_SECONDS:
                 raise BackupError(source.name + ": offsite snapshot dated in the future")
             if prior and (now - prior).total_seconds() > MAX_FORWARD_JUMP_SECONDS:
@@ -576,6 +583,15 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                 tar_key = f"{INSTANCE_PREFIX}{now:%Y/%m/%d}/{os.path.basename(tar_path)}"
                 planned.append((tar_path, tar_key))
             incoming_objs = [Obj(k, os.path.getsize(p)) for p, k in planned]
+
+        # Capture/upload may take hours. Freshness and retention use observation
+        # time, not the invocation timestamp retained in the run receipt.
+        invoked_at = now
+        if cfg.sources and not dry_run:
+            now = snapshots.utc_now()
+            if clock_start < invoked_at:
+                raise BackupError("snapshot clock moved backward since invocation")
+            snapshots.check_clock(clock_start, start_tick, now, snapshots.time.monotonic())
 
         # c) cap guard against the projected size: current + incoming - planned deletions
         incoming = sum(o.size for o in incoming_objs)
@@ -620,6 +636,12 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             for o in incoming_objs:
                 existing[o.key.split("/", 1)[0] + "/"].append(o)
 
+        if cfg.sources and not dry_run:
+            observed = snapshots.utc_now()
+            if observed < now:
+                raise BackupError("snapshot clock moved backward during upload")
+            snapshots.check_clock(clock_start, start_tick, observed, snapshots.time.monotonic())
+            now = observed
         newest_db = newest_ts(existing[DB_PREFIX])
         if newest_db is None or (now - newest_db).total_seconds() > FRESH_DUMP_SECONDS:
             raise BackupError("newest offsite database backup is older than 26h")
@@ -627,8 +649,8 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         status["snapshot_freshness"] = {}
         if not dry_run:
             for source in cfg.sources:
-                stamp = newest_ts([o for o in existing[source.prefix]
-                                   if snapshots.BUNDLE.fullmatch(o.key)])
+                stamp = max((snapshots.key_lower_bound(o.key) for o in existing[source.prefix]
+                             if snapshots.TIMED_BUNDLE.fullmatch(o.key)), default=None)
                 fresh = stamp is not None and 0 <= (now - stamp).total_seconds() < FRESH_DUMP_SECONDS
                 status["snapshot_freshness"][source.name] = fresh
                 if not fresh:

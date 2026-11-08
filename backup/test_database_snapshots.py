@@ -32,6 +32,9 @@ class SnapshotTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = self.tmp.name
+        clock = mock.patch.object(s, "utc_now", return_value=NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def bundle(self, name="hindsight"):
         @contextlib.contextmanager
@@ -61,10 +64,40 @@ class SnapshotTests(unittest.TestCase):
                 mock.patch.object(s, "execute", side_effect=dump):
             path, key = s.capture(source(), NOW, self.root)
         metadata.assert_called_once_with(source(), "00000003-000000A1-1")
-        self.assertEqual(key, "hindsight/2026/11/08/hindsight-20261108-042000.tar")
+        self.assertEqual(key, "hindsight/2026/11/08/hindsight-20261108-042000-snapshot.tar")
         dump, manifest = s.unpack(path, self.root, source())
         self.assertEqual(manifest["dump_sha256"], s.sha256(dump))
         self.assertEqual(manifest["counts"], expected()["counts"])
+
+    def test_delayed_second_source_uses_acquisition_not_invocation(self):
+        # Invocation 04:20, second source cannot acquire its snapshot until 05:50.
+        # These are controlled clocks; no waiting or live DB access is involved.
+        later = NOW + dt.timedelta(hours=1, minutes=30, microseconds=123456)
+        bounds = iter((NOW, NOW + dt.timedelta(seconds=1), later,
+                       later + dt.timedelta(seconds=2)))
+
+        @contextlib.contextmanager
+        def snapshot(_):
+            yield "00000003-000000A1-1"
+
+        def dump(args, **kwargs):
+            kwargs["output"].write(b"PGDMP-fixture")
+
+        with mock.patch.object(s, "utc_now", side_effect=lambda: next(bounds), create=True), \
+                mock.patch.object(s.time, "monotonic", side_effect=(0, 1, 2, 4)), \
+                mock.patch.object(s, "exported_snapshot", snapshot), \
+                mock.patch.object(s, "metadata", return_value=expected()), \
+                mock.patch.object(s, "execute", side_effect=dump):
+            first = s.capture(source("paperclip"), NOW, self.root)
+            second = s.capture(source(), NOW, self.root)
+        self.assertEqual(b.key_timestamp(second[1]), later.replace(microsecond=0))
+        self.assertEqual(first[1], "paperclip/2026/11/08/paperclip-20261108-042000-snapshot.tar")
+        self.assertEqual(second[1], "hindsight/2026/11/08/hindsight-20261108-055000-snapshot.tar")
+        _, manifest = s.unpack(second[0], self.root, source())
+        interval = s.validate_timing(manifest, second[1])
+        self.assertEqual(interval, (later, later + dt.timedelta(seconds=2)))
+        with self.assertRaisesRegex(s.SnapshotError, "before incident"):
+            s.require_preincident(manifest, second[1], NOW.replace(hour=5, minute=0))
 
     def test_unpack_rejects_extended_headers_without_expanding_them(self):
         path = os.path.join(self.root, "extended.tar")
@@ -227,7 +260,8 @@ class SnapshotTests(unittest.TestCase):
             store.download.side_effect = RuntimeError("SECRET signed URL")
             cfg = b.Config("fixture", "", "", tmp_dir=self.root, receipt_dir=self.root,
                            sources=(source("hindsight"), source("paperclip")))
-            self.assertEqual(s.drill(cfg, store, NOW + age), 1)
+            with mock.patch.object(s, "utc_now", return_value=NOW + age):
+                self.assertEqual(s.drill(cfg, store, NOW + age), 1)
             receipt = json.loads(store.put_bytes.call_args.args[0])
             self.assertFalse(receipt["ok"])
             self.assertNotIn("SECRET", json.dumps(receipt))
@@ -235,7 +269,93 @@ class SnapshotTests(unittest.TestCase):
                 store.download.assert_not_called()
 
 
+class TimingTests(unittest.TestCase):
+    def manifest(self, lower=NOW, upper=NOW):
+        return {"version": 2, "database": "hindsight", "timestamp": s.timestamp(lower),
+                "snapshot_acquisition": {"not_before": s.timestamp(lower),
+                                         "not_after": s.timestamp(upper), "clock": s.CLOCK}}
+
+    def test_cutoff_uses_upper_bound_strictly_and_preserves_microseconds(self):
+        lower = NOW.replace(hour=4, minute=59, second=59, microsecond=999999)
+        cutoff = NOW.replace(hour=5, minute=0)
+        key = s.timing_key("hindsight", lower)
+        for upper, safe in ((lower, True), (cutoff, False),
+                            (cutoff + dt.timedelta(microseconds=1), False)):
+            with self.subTest(upper=upper):
+                manifest = self.manifest(lower, upper)
+                if safe:
+                    self.assertEqual(s.require_preincident(manifest, key, cutoff), (lower, upper))
+                else:
+                    with self.assertRaisesRegex(s.SnapshotError, "before incident"):
+                        s.require_preincident(manifest, key, cutoff)
+
+    def test_freshness_uses_lower_bound_and_excludes_26h_boundary(self):
+        upper = NOW + dt.timedelta(hours=2)
+        manifest = self.manifest(NOW, upper)
+        key = s.timing_key("hindsight", NOW)
+        s.require_fresh(manifest, key, NOW + dt.timedelta(hours=26, microseconds=-1))
+        for observed in (NOW + dt.timedelta(hours=26), upper - dt.timedelta(microseconds=1)):
+            with self.assertRaises(s.SnapshotError):
+                s.require_fresh(manifest, key, observed)
+
+    def test_interval_and_key_validation_fail_closed(self):
+        key = s.timing_key("hindsight", NOW)
+        for field, value in (("not_before", "2026-11-08T04:20:00Z"),
+                             ("not_after", "2026-11-08T04:20:00.000000+00:00"),
+                             ("not_after", "2026-02-30T04:20:00.000000Z"),
+                             ("not_after", s.timestamp(NOW - dt.timedelta(microseconds=1))),
+                             ("clock", "invocation")):
+            manifest = self.manifest()
+            manifest["snapshot_acquisition"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(s.SnapshotError):
+                s.validate_timing(manifest, key)
+        manifest = self.manifest()
+        manifest["timestamp"] = s.timestamp(NOW + dt.timedelta(seconds=1))
+        with self.assertRaises(s.SnapshotError):
+            s.validate_timing(manifest, key)
+        for bad_key in (key.replace("/08/", "/07/"),
+                        s.timing_key("paperclip", NOW),
+                        s.timing_key("hindsight", NOW + dt.timedelta(seconds=1)),
+                        key.replace("20261108", "20260230"),
+                        key.replace("-snapshot", "")):
+            with self.subTest(key=bad_key), self.assertRaises(s.SnapshotError):
+                s.validate_timing(self.manifest(), bad_key)
+
+    def test_legacy_manifest_never_inherits_corrected_guarantee(self):
+        manifest = self.manifest()
+        manifest["version"] = 1
+        key = s.timing_key("hindsight", NOW)
+        with self.assertRaisesRegex(s.SnapshotError, "legacy"):
+            s.require_preincident(manifest, key, NOW + dt.timedelta(hours=1))
+        with self.assertRaisesRegex(s.SnapshotError, "legacy"):
+            s.require_fresh(manifest, key, NOW)
+
+    def test_clock_rails_detect_backward_invalid_and_observable_steps(self):
+        s.check_clock(NOW, 10, NOW + dt.timedelta(seconds=2), 12)
+        for end, tick in ((NOW - dt.timedelta(microseconds=1), 11),
+                          (NOW + dt.timedelta(seconds=2), 9),
+                          (NOW + dt.timedelta(seconds=20), 11)):
+            with self.assertRaises(s.SnapshotError):
+                s.check_clock(NOW, 10, end, tick)
+        with self.assertRaises(s.SnapshotError):
+            s.timestamp(NOW.replace(tzinfo=None))
+
+    def test_midnight_key_and_gfs_use_conservative_lower_date(self):
+        lower = NOW.replace(hour=23, minute=59, second=59, microsecond=999999)
+        upper = lower + dt.timedelta(seconds=2)
+        key = s.timing_key("hindsight", lower)
+        self.assertIn("/2026/11/08/", key)
+        self.assertEqual(s.validate_timing(self.manifest(lower, upper), key), (lower, upper))
+        self.assertEqual(s.key_lower_bound(key), lower.replace(microsecond=0))
+
+
 class BackupSnapshotTests(RunFixture):
+    def setUp(self):
+        super().setUp()
+        clock = mock.patch.object(s, "utc_now", return_value=self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def configure(self):
         self.cfg.sources = (source("paperclip"), source("hindsight"))
 
@@ -243,7 +363,7 @@ class BackupSnapshotTests(RunFixture):
         path = os.path.join(dest, source.name + ".tar")
         with open(path, "wb") as stream:
             stream.write(b"snapshot fixture")
-        return path, f"{source.prefix}{now:%Y/%m/%d}/{source.name}-{now:%Y%m%d-%H%M%S}.tar"
+        return path, s.timing_key(source.name, now)
 
     def test_native_backup_preserved_with_independent_snapshot_freshness(self):
         self.configure()
@@ -263,9 +383,11 @@ class BackupSnapshotTests(RunFixture):
             # Simulate the snapshot object left behind by a failed verify. Merely
             # seeing this key must not let the retry bypass capture/verification.
             for src in self.cfg.sources:
-                rc.store[f"{src.prefix}{self.now:%Y/%m/%d}/{src.name}-{self.now:%Y%m%d-%H%M%S}.tar"] = 1
+                rc.store[s.timing_key(src.name, self.now)] = 1
             capture.reset_mock()
-            self.assertEqual(b.run(self.cfg, rc, self.now + dt.timedelta(minutes=5)), 1)
+            later = self.now + dt.timedelta(minutes=5)
+            with mock.patch.object(s, "utc_now", return_value=later):
+                self.assertEqual(b.run(self.cfg, rc, later), 1)
             self.assertEqual(capture.call_count, 2)
         self.assertEqual(rc.deleted, [])
         self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
@@ -295,6 +417,60 @@ class BackupSnapshotTests(RunFixture):
         self.assertEqual(rc.uploaded, [])
         self.assertFalse(os.listdir(self.tmp))
 
+    def test_delayed_captures_refresh_observation_time_before_freshness(self):
+        self.configure()
+        rc = FakeRclone()
+        later = self.now + dt.timedelta(minutes=90)
+        observed = later + dt.timedelta(minutes=1)
+        manifests = {}
+        original_upload = rc.upload
+
+        @contextlib.contextmanager
+        def snapshot(_):
+            yield "00000003-000000A1-1"
+
+        def dump(args, **kwargs):
+            kwargs["output"].write(b"PGDMP-fixture")
+
+        def upload(path, key):
+            if s.TIMED_BUNDLE.fullmatch(key):
+                src = source(key.split("/")[0])
+                _, manifest = s.unpack(path, self.root, src)
+                manifests[src.name] = (key, manifest)
+            original_upload(path, key)
+
+        clocks = (self.now, self.now + dt.timedelta(minutes=10), self.now + dt.timedelta(minutes=10, seconds=2),
+                  later, later + dt.timedelta(seconds=2), observed, observed)
+        with mock.patch.object(s, "utc_now", side_effect=clocks), \
+                mock.patch.object(s.time, "monotonic", side_effect=(0, 600, 602, 5400, 5402, 5460, 5460)), \
+                mock.patch.object(s, "exported_snapshot", snapshot), \
+                mock.patch.object(s, "metadata", return_value=expected()), \
+                mock.patch.object(s, "execute", side_effect=dump), \
+                mock.patch.object(rc, "upload", side_effect=upload):
+            self.assertEqual(b.run(self.cfg, rc, self.now), 0)
+        key, manifest = manifests["hindsight"]
+        self.assertEqual(s.validate_timing(manifest, key)[0], later)
+        with self.assertRaises(s.SnapshotError):
+            s.require_preincident(manifest, key, self.now + dt.timedelta(minutes=40))
+        self.assertTrue(rc.puts[b.STATUS_KEY]["snapshot_freshness"]["hindsight"])
+
+    def test_backward_observation_clock_prevents_upload_and_retention(self):
+        self.configure()
+        rc = FakeRclone()
+        with mock.patch.object(s, "capture", side_effect=self.capture), \
+                mock.patch.object(s, "utc_now", return_value=self.now - dt.timedelta(seconds=1)):
+            self.assertEqual(b.run(self.cfg, rc, self.now), 1)
+        self.assertEqual((rc.uploaded, rc.deleted), ([], []))
+
+    def test_legacy_history_is_never_pruned_or_used_as_timed_floor(self):
+        timed = [b.Obj(s.timing_key("hindsight", self.now - dt.timedelta(days=n)), 10)
+                 for n in range(8)]
+        legacy = [b.Obj(o.key.replace("-snapshot", ""), 10) for o in timed]
+        plan = b.plan_retention(timed + legacy, self.now, (0, 0, 0), 10, True, "hindsight/")
+        self.assertEqual(len(plan.delete), 5)
+        self.assertTrue(set(plan.delete).issubset({o.key for o in timed[3:]}))
+        self.assertFalse(set(plan.delete) & {o.key for o in legacy})
+
     def test_main_uses_existing_daily_invocation_for_weekly_drill(self):
         self.configure()
         self.cfg.restore_weekday = self.now.weekday()
@@ -321,7 +497,7 @@ class BackupSnapshotTests(RunFixture):
 
     def test_snapshot_gfs_keeps_newest_three_and_shares_delete_budget(self):
         now = self.now
-        objs = [b.Obj(f"hindsight/{stamp:%Y/%m/%d}/hindsight-{stamp:%Y%m%d-%H%M%S}.tar", 10)
+        objs = [b.Obj(s.timing_key("hindsight", stamp), 10)
                 for stamp in (now - dt.timedelta(days=n) for n in range(8))]
         plan = b.plan_retention(objs, now, (0, 0, 0), 2, True, "hindsight/")
         self.assertEqual(len(plan.delete), 2)

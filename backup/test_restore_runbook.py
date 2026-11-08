@@ -13,6 +13,37 @@ import paperclip_r2_backup as backup  # noqa: E402
 
 
 class RecoveryRunbookTests(unittest.TestCase):
+    def test_documented_gate_uses_interval_before_restore(self):
+        import datetime as dt
+        import database_snapshots as snapshots
+        doc = (Path(__file__).resolve().parents[1] / "docs/restore.md").read_text()
+        snippet = doc.split("<<'PY'\n", 1)[1].split("\n   PY", 1)[0]
+        tree = ast.parse(textwrap.dedent(snippet))
+        lock = next(node for node in tree.body if isinstance(node, ast.With))
+        gate_index = next(i for i, node in enumerate(lock.body)
+                          if "snapshots.require_preincident(" in ast.unparse(node))
+        restore_index = next(i for i, node in enumerate(lock.body)
+                             if "snapshots.restore_and_compare(" in ast.unparse(node))
+        self.assertLess(gate_index, restore_index)
+        gate = lock.body[gate_index]
+        code = compile(ast.fix_missing_locations(ast.Module(body=[gate], type_ignores=[])),
+                       "recovery-timing-gate", "exec")
+        lower = dt.datetime(2026, 11, 8, 4, 59, 59, 999999, tzinfo=dt.timezone.utc)
+        cutoff = lower + dt.timedelta(microseconds=1)
+        manifest = {"version": 2, "database": "hindsight", "timestamp": snapshots.timestamp(lower),
+                    "snapshot_acquisition": {"not_before": snapshots.timestamp(lower),
+                                             "not_after": snapshots.timestamp(cutoff),
+                                             "clock": snapshots.CLOCK}}
+        scope = {"snapshots": snapshots, "manifest": manifest,
+                 "key": snapshots.timing_key("hindsight", lower), "cutoff": cutoff}
+        with self.assertRaises(snapshots.SnapshotError):
+            exec(code, scope)
+        manifest["snapshot_acquisition"]["not_after"] = snapshots.timestamp(lower)
+        exec(code, scope)
+        manifest["version"] = 1
+        with self.assertRaises(snapshots.SnapshotError):
+            exec(code, scope)
+
     def test_recovery_lock_on_fresh_host_and_existing_busy_lock(self):
         doc = (Path(__file__).resolve().parents[1] / "docs/restore.md").read_text()
         snippet = doc.split("<<'PY'\n", 1)[1].split("\n   PY", 1)[0]

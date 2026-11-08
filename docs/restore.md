@@ -85,8 +85,8 @@ With `SNAPSHOT_BACKUPS=true`, the daily run additionally creates:
 
 | Key | Content |
 | --- | --- |
-| `paperclip/YYYY/MM/DD/paperclip-YYYYMMDD-HHMMSS.tar` | Supplemental custom-format Paperclip dump and source-snapshot manifest |
-| `hindsight/YYYY/MM/DD/hindsight-YYYYMMDD-HHMMSS.tar` | Hindsight custom-format dump and source-snapshot manifest |
+| `paperclip/YYYY/MM/DD/paperclip-YYYYMMDD-HHMMSS-snapshot.tar` | Supplemental custom-format Paperclip dump and source-snapshot manifest |
+| `hindsight/YYYY/MM/DD/hindsight-YYYYMMDD-HHMMSS-snapshot.tar` | Hindsight custom-format dump and source-snapshot manifest |
 | `status/restore-last.json` | Latest drill result, including failure; never an implied live success |
 
 Each uncompressed tar contains exactly `dump.pgcustom` (`pg_dump -Fc`, internally
@@ -105,6 +105,53 @@ retention, and no completed bundle is published until capture finishes. Same-day
 retries recapture and reverify new database bundles: object presence alone is not
 proof that an earlier upload passed verification. This may create several same-day
 bundles, still governed by GFS, the newest-three floor and the aggregate cap.
+
+### Acquisition time, freshness and recovery eligibility
+
+Version 2 manifests record an **interval for each source**,
+`snapshot_acquisition.not_before` / `not_after`, with six-digit fractional UTC
+seconds and `clock: host-utc-bracket-v1`. The lower sample is taken immediately
+before starting that source's export connection; the upper sample is taken as soon
+as its exported snapshot ID is received, **before** counts or dumping. Connection,
+startup and export delays are included, not hidden. The first PostgreSQL snapshot
+acquisition is inside that interval. This is not a claim of an exact server instant,
+clock accuracy of one microsecond, invocation time, dump completion or receipt time.
+Counts and dump still import the very same exported snapshot.
+
+The host clock must be accurately synchronized to UTC and remain stable; incident
+cutoffs must use the same time basis. The tools reject backward intervals, naive or
+malformed timestamps, and observed wall-clock/monotonic elapsed-time discrepancies
+over one second during export and backup processing. These checks cannot establish
+UTC accuracy or detect every clock correction. If clock accuracy/skew is uncertain,
+do not claim pre-incident safety: independently establish timing or choose a proven
+earlier point through incident approval. Cross-database captures are independent,
+not one atomic recovery point.
+
+The manifest `timestamp` is the full-precision **lower bound**, not an exact snapshot
+instant. New `-snapshot.tar` keys and their UTC date directories encode that lower
+bound **floored to seconds**. Validation binds both key/date and manifest interval.
+Freshness uses the lower bound (<26h, excluding equality), while backup listings/GFS
+use its conservative second floor; a second-floor boundary can reject freshness up
+to one second early. Observation time is refreshed after capture/upload and restore,
+not frozen at invocation. GFS chooses the newest lower-bound key per retained UTC
+day/week/month and retains the newest three timed bundles; it makes no stronger
+claim about ordering actual acquisitions inside overlapping intervals.
+
+Pre-incident eligibility requires the validated **upper bound strictly before** the
+incident cutoff. Equality or an interval straddling the cutoff fails, even when the
+key's date/time looks early enough. Compare eligible intervals and the incident's
+required restore point; do not sort keys alone and call the latest one safe. Estimate
+conservative lost-write exposure from the lower bound. The recovery helper below
+enforces the upper-bound/cutoff check before isolated or persistent restoration.
+
+Legacy version 1 bundles (keys without `-snapshot`) used invocation time. Their
+acquisition time is **unknown**, even if a prior drill matched counts perfectly.
+They remain downloadable and parseable for separately approved investigation, but
+are excluded from corrected freshness, automated drills, pre-incident selection and
+automatic GFS deletion. They are not relabeled or silently granted version 2 timing.
+Legacy bytes still count against the aggregate cap; review any eventual manual
+retirement separately, preserving the only useful recovery copies. Native `db/`
+SQL and `instance/` retention semantics are unchanged.
 
 Schema head means the migration ledger rows at capture: default
 `drizzle.__drizzle_migrations(hash,created_at)` for Paperclip and
@@ -152,11 +199,14 @@ service. Persistent recovery and cutover require a separate exact-source/target
 Release Manager acceptance, maintenance window, rollback target and Operator action.
 No live recovery is performed or claimed by this implementation change.
 
-1. Choose a recovery point from `hindsight/YYYY/MM/DD/hindsight-YYYYMMDD-HHMMSS.tar`
+1. Choose a recovery point from `hindsight/YYYY/MM/DD/hindsight-YYYYMMDD-HHMMSS-snapshot.tar`
    in the private bucket using the existing authorized console/rclone access.
-   Record the exact key, UTC recovery point and expected lost-write interval.
-   Prefer the newest known-good point **before** the incident; an older recovery
-   point may legitimately be more than 26h old. Do not use `db/` or `paperclip/`.
+   Record the exact key, validated per-source UTC acquisition interval, incident
+   cutoff and expected lost-write interval. Require `not_after < cutoff`, never
+   invocation time or a key alone. Among eligible known-good points choose the
+   required recovery interval; a point may legitimately be more than 26h old.
+   Legacy invocation-dated bundles cannot prove this condition without independent
+   timing evidence and are rejected by this helper. Do not use `db/` or `paperclip/`.
    A matching prior protected receipt can corroborate object/dump hashes; the
    manifest hash alone is integrity checking, not independent authenticity proof.
 2. Verify the recovery environment has the source PostgreSQL major (currently 18),
@@ -183,18 +233,20 @@ No live recovery is performed or claimed by this implementation change.
    umask 077
    TOOLS="$HOME/.local/share/paperclip-r2-backup"
    RECOVERY=$(mktemp -d "$HOME/hindsight-recovery.XXXXXXXX")
-   KEY='hindsight/2026/11/08/hindsight-20261108-042000.tar'
-   python3 -I - "$TOOLS" "$RECOVERY" "$KEY" <<'PY'
+   KEY='hindsight/2026/11/08/hindsight-20261108-042000-snapshot.tar'
+   CUTOFF='2026-11-08T05:00:00.000000Z'  # Actual incident cutoff, not this example.
+   python3 -I - "$TOOLS" "$RECOVERY" "$KEY" "$CUTOFF" <<'PY'
    import datetime as dt
    import fcntl, json, os, sys
    sys.path.insert(0, os.path.abspath(sys.argv[1]))  # Trusted installed code only.
    import paperclip_r2_backup as backup
    import database_snapshots as snapshots
    os.umask(0o077)
-   dest, key = sys.argv[2:]
+   dest, key, cutoff_text = sys.argv[2:]
+   cutoff = snapshots.instant(cutoff_text)
    cfg = backup.load_config()
    source = next(s for s in cfg.sources if s.name == 'hindsight')
-   if not key.startswith('hindsight/') or not snapshots.BUNDLE.fullmatch(key):
+   if not key.startswith('hindsight/') or not snapshots.TIMED_BUNDLE.fullmatch(key):
        raise SystemExit('invalid recovery key')
    with open(os.path.join(backup._ensure_dir(cfg.tmp_dir), 'operation.lock'), 'a') as lock:
        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -207,13 +259,13 @@ No live recovery is performed or claimed by this implementation change.
        if os.path.getsize(path) != objects[0].size:
            raise SystemExit('recovery object size mismatch')
        dump, manifest = snapshots.unpack(path, dest, source)
-       stamp = backup.key_timestamp(key).strftime('%Y-%m-%dT%H:%M:%SZ')
-       if manifest['timestamp'] != stamp:
-           raise SystemExit('recovery timestamp mismatch')
+       snapshots.require_preincident(manifest, key, cutoff)
        actual = snapshots.restore_and_compare(source, dump, manifest)
        receipt = dict(timestamp=dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
                       object_key=key, object_sha256=snapshots.sha256(path),
-                      dump_sha256=manifest['dump_sha256'], source_timestamp=stamp,
+                      dump_sha256=manifest['dump_sha256'], source_timestamp=manifest['timestamp'],
+                      snapshot_acquisition=manifest['snapshot_acquisition'],
+                      incident_cutoff=snapshots.timestamp(cutoff),
                       restore_image=source.image, cleanup_ok=True, **actual)
        with open(os.path.join(dest, 'isolated-validation.json'), 'x') as out:
            json.dump(receipt, out, indent=2, sort_keys=True)
