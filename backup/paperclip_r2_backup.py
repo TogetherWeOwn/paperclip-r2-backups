@@ -660,9 +660,9 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             # runs: prune what GFS drops anyway (newest objects stay fresh and kept).
             if not retention_block:
                 try:
-                    # Proposed uploads do not exist on this path. Even a run
-                    # with nothing to upload must not prune stale recovery points.
-                    check_offsite_freshness(cfg, existing, now, dry_run)
+                    # Rejected uploads cannot refresh any source, even in dry-run.
+                    # Judge all enabled sources from actual existing inventory.
+                    check_offsite_freshness(cfg, existing, now, dry_run=False)
                 except BackupError as exc:
                     log(f"retention skipped: {exc}; cap recovery requires a fresh "
                         "offsite backup or reviewed manual cleanup; do not relax safety rails")

@@ -565,6 +565,48 @@ class InheritedBoundaryTests(RunFixture):
         self.assertEqual(rc.uploaded, [])
         self.assertEqual(rc.deleted, [])
 
+    def test_cap_recovery_dry_run_matches_supplemental_freshness(self):
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        instance = f"instance/{self.now:%Y/%m/%d}/paperclip-instance-{self.now:%Y%m%d-%H%M%S}.tar.gz"
+        self.cfg.cap_bytes = 1
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 3, 0, 0
+        self.cfg.max_deletes = 4
+        for name in ("paperclip", "hindsight"):
+            self.cfg.sources = (b.snapshots.Source(name, name, "public.fixture", ("id",), "fixture"),)
+            for age in (27, 26, 25):
+                stamp = self.now - dt.timedelta(hours=age)
+                history = [b.snapshots.timing_key(name, stamp - dt.timedelta(days=i))
+                           for i in range(9)]
+                objs = [b.Obj(b.db_key_for(dump), 10), b.Obj(instance, 10)]
+                objs += [b.Obj(key, 50) for key in history]
+                expected = list(reversed(history[-4:])) if age < 26 else []
+                for dry_run in (False, True):
+                    with self.subTest(source=name, age=age, dry_run=dry_run):
+                        rc = FakeRclone(objs)
+                        before = dict(rc.store)
+                        captured = (dump, b.snapshots.timing_key(name, self.now))
+                        with mock.patch.object(b.snapshots, "capture", return_value=captured) as capture, \
+                                mock.patch.object(b, "log") as logged:
+                            self.assertEqual(b.run(self.cfg, rc, self.now, dry_run), b.EXIT_CAP)
+                        messages = [call.args[0] for call in logged.call_args_list]
+                        proposed = [line.removeprefix("dry-run: would delete ") for line in messages
+                                    if line.startswith("dry-run: would delete ")]
+                        self.assertEqual(rc.uploaded, [])
+                        self.assertEqual(rc.puts, {})
+                        if dry_run:
+                            capture.assert_not_called()
+                            self.assertEqual(rc.store, before)
+                            self.assertEqual(rc.deleted, [])
+                            self.assertEqual(proposed, expected)
+                        else:
+                            capture.assert_called_once()
+                            self.assertEqual(rc.deleted, expected)
+                            self.assertEqual(rc.store, {k: v for k, v in before.items()
+                                                        if k not in expected})
+                        if age >= 26:
+                            self.assertTrue(any(name + ": newest offsite dump is not fresh"
+                                                in line for line in messages))
+
     def test_cap_recovery_delete_failure_does_not_advise_fresh_backup(self):
         self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 3, 0, 0
         self.cfg.max_deletes = 2
