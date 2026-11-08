@@ -558,7 +558,10 @@ class InheritedBoundaryTests(RunFixture):
         rc = FakeRclone(objs)
         self.cfg.cap_bytes = sum(rc.store.values())
         self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
-        self.assertEqual(b.run(self.cfg, rc, invoked), b.EXIT_CAP)
+        with mock.patch.object(b, "log") as logged:
+            self.assertEqual(b.run(self.cfg, rc, invoked), b.EXIT_CAP)
+        self.assertIn("cap recovery requires a fresh offsite backup or reviewed manual cleanup",
+                      "\n".join(call.args[0] for call in logged.call_args_list))
         self.assertEqual(rc.uploaded, [])
         self.assertEqual(rc.deleted, [])
 

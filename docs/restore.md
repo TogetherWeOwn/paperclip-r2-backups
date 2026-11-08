@@ -397,8 +397,18 @@ No live recovery is performed or claimed by this implementation change.
 
 - Backup failures return 1; aggregate cap rejection returns 2. Upload/verification
   failure blocks retention. GFS/minimum-three/clock/delete-budget rails also cover
-  the new prefixes. Cap rejection preserves the existing behavior of allowing
-  bounded pruning of already-expired history; it never deletes the newest three.
+  the new prefixes. Cap rejection allows bounded pruning of already-expired
+  history only while the **existing offsite** native dump is no older than 26h
+  and every enabled supplemental source is fresh (<26h). The rejected uploads
+  do not count as offsite recovery points. All GFS/minimum-three/clock/delete-budget
+  rails still apply; cap recovery never deletes the newest three.
+  If the cap prevents uploads and existing offsite backups are stale (for example,
+  after a missed run), retries cannot restore freshness or resume automatic pruning.
+  Inspect the journal's `retention skipped` diagnostic and inventory with the
+  operator; recovery requires room for a fresh verified offsite backup, or a
+  separately reviewed manual cleanup of eligible history. Preserve recovery
+  points and evidence; do not relax freshness/retention rails, delete objects
+  blindly, or increase the cap. This guidance does not authorize live operations.
   New bundles increase storage and exact counts increase source I/O: observe both.
 - Independent freshness is written to `status/last-run.json` on successful snapshot
   processing. A failed overall backup is never a freshness attestation. A weekly

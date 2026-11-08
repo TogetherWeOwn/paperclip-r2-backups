@@ -666,7 +666,8 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                     apply_retention(compute_retention(cfg, existing, now, True),
                                     rc, status, dry_run)
                 except BackupError as exc:
-                    log(f"retention skipped: {exc}")
+                    log(f"retention skipped: {exc}; cap recovery requires a fresh "
+                        "offsite backup or reviewed manual cleanup; do not relax safety rails")
             raise _Stop()
 
         if not dry_run:
