@@ -143,6 +143,144 @@ memory at 64 GiB. If the host cannot safely fit the live restore, do not weaken
 isolation or skip verification: route the capacity prerequisite. Two databases are
 restored sequentially, never with overlapping target memory allocations.
 
+### Hindsight disaster recovery (separately authorized Operator procedure)
+
+This section is a runbook, **not authorization to run live recovery**. The native
+Paperclip `gunzip | psql` procedure does not apply to Hindsight's tar/custom dump.
+The scheduled drill only creates throwaway targets; it never recovers a persistent
+service. Persistent recovery and cutover require a separate exact-source/target
+Release Manager acceptance, maintenance window, rollback target and Operator action.
+No live recovery is performed or claimed by this implementation change.
+
+1. Choose a recovery point from `hindsight/YYYY/MM/DD/hindsight-YYYYMMDD-HHMMSS.tar`
+   in the private bucket using the existing authorized console/rclone access.
+   Record the exact key, UTC recovery point and expected lost-write interval.
+   Prefer the newest known-good point **before** the incident; an older recovery
+   point may legitimately be more than 26h old. Do not use `db/` or `paperclip/`.
+   A matching prior protected receipt can corroborate object/dump hashes; the
+   manifest hash alone is integrity checking, not independent authenticity proof.
+2. Verify the recovery environment has the source PostgreSQL major (currently 18),
+   compatible `pg_restore`, pgvector **and every other installed source extension**,
+   admitted expanded-data/index/WAL capacity and the reviewed image digest. Avoid
+   application startup/migrations during comparison. Stop the backup timer, let
+   the service finish, and serialize manual work with its existing `operation.lock`.
+   Load the existing protected env without tracing; keep all service/pass files
+   mode 0600. Never put credentials/URLs in argv, logs or public evidence.
+3. Download and validate **only the selected object**, using the reviewed installed
+   helpers below. Run from a trusted directory, never from downloaded content.
+   `TOOLS` must name the trusted, reviewed installed modules; `RECOVERY` is a new
+   empty private directory on admitted storage, not an existing restore directory.
+   Set `KEY` to the selected key, not the illustrative timestamp below. The helper
+   bounds download bytes by the existing cap, checks listed/downloaded size, uses
+   the bounded two-regular-member parser (no general `tar -xf`), validates manifest
+   database/ledger/hash and key timestamp, then runs isolated comparison first.
+   Both source settings/image pins must be valid for `load_config`; it opens no
+   source DB connection. Older bundles require the ledger configuration at capture,
+   verified independently rather than blindly adopted from an untrusted manifest.
+
+   ```sh
+   # Protected backup env already loaded; no shell tracing or environment dump.
+   umask 077
+   TOOLS="$HOME/.local/share/paperclip-r2-backup"
+   RECOVERY=$(mktemp -d "$HOME/hindsight-recovery.XXXXXXXX")
+   KEY='hindsight/2026/11/08/hindsight-20261108-042000.tar'
+   python3 -I - "$TOOLS" "$RECOVERY" "$KEY" <<'PY'
+   import datetime as dt
+   import fcntl, json, os, sys
+   sys.path.insert(0, os.path.abspath(sys.argv[1]))  # Trusted installed code only.
+   import paperclip_r2_backup as backup
+   import database_snapshots as snapshots
+   os.umask(0o077)
+   dest, key = sys.argv[2:]
+   cfg = backup.load_config()
+   source = next(s for s in cfg.sources if s.name == 'hindsight')
+   if not key.startswith('hindsight/') or not snapshots.BUNDLE.fullmatch(key):
+       raise SystemExit('invalid recovery key')
+   with open(os.path.join(cfg.tmp_dir, 'operation.lock'), 'a') as lock:
+       fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+       rc = backup.Rclone(cfg.bucket, cfg.rclone_bin)
+       objects = [o for o in rc.list('hindsight/') if o.key == key]
+       if len(objects) != 1 or not 0 < objects[0].size <= cfg.cap_bytes:
+           raise SystemExit('recovery object absent or exceeds download cap')
+       path = os.path.join(dest, 'offsite.tar')
+       rc.download(key, path, cfg.cap_bytes)
+       if os.path.getsize(path) != objects[0].size:
+           raise SystemExit('recovery object size mismatch')
+       dump, manifest = snapshots.unpack(path, dest, source)
+       stamp = backup.key_timestamp(key).strftime('%Y-%m-%dT%H:%M:%SZ')
+       if manifest['timestamp'] != stamp:
+           raise SystemExit('recovery timestamp mismatch')
+       actual = snapshots.restore_and_compare(source, dump, manifest)
+       receipt = dict(timestamp=dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+                      object_key=key, object_sha256=snapshots.sha256(path),
+                      dump_sha256=manifest['dump_sha256'], source_timestamp=stamp,
+                      restore_image=source.image, cleanup_ok=True, **actual)
+       with open(os.path.join(dest, 'isolated-validation.json'), 'x') as out:
+           json.dump(receipt, out, indent=2, sort_keys=True)
+   PY
+   ```
+
+   A nonzero exit stops recovery: do not proceed on partial files or a missing
+   success receipt. Investigate privately and inspect leftover files/targets as
+   below. This manual CLI helper has per-child timeouts but no six-hour unit-wide
+   deadline; retain an attended, bounded approved use window. It retains plaintext
+   intentionally for the next step; it neither publishes a scheduled-drill receipt
+   nor grants persistent restore permission.
+4. **After separate persistent-recovery approval**, stop Hindsight application
+   writers, record the old target/rollback reference, and provision an empty,
+   persistent replacement database on the approved compatible server. Do not
+   overwrite the old database. Independently confirm the protected libpq service
+   `hindsight-recovery` points to that replacement, not the live source. Provision
+   approved database owner/roles/extensions first: the dump omits ownership/ACLs,
+   so required application grants must be deliberately re-established. No new
+   credential, source trust rule or privilege escalation is authorized here.
+   With `PGSERVICEFILE`/`PGPASSFILE` set to protected absolute paths, restore using
+   an existing authorized identity (example database name `hindsight_recovered`):
+
+   ```sh
+   PGSERVICE=hindsight-recovery pg_restore --dbname=hindsight_recovered \
+     --exit-on-error --no-owner --no-acl --no-tablespaces "$RECOVERY/dump.pgcustom" \
+     >"$RECOVERY/persistent-restore.stdout" 2>"$RECOVERY/persistent-restore.stderr"
+   ```
+
+   Client output is protected incident material: never attach it publicly. Nonzero
+   exit means the replacement is incomplete; keep writers stopped, diagnose and
+   recreate only that approved replacement before retrying, never use `--clean`
+   against the live source. Tablespaces map to the replacement default, as in the
+   drill. No application start or automatic migration is part of this restore.
+5. Before cutover, compare the **persistent** target's full metadata, not just the
+   throwaway result. From the same trusted directory use the installed helpers
+   and the independently confirmed target service/database:
+
+   ```sh
+   python3 -I - "$TOOLS" "$RECOVERY" <<'PY'
+   import dataclasses, json, os, sys
+   sys.path.insert(0, os.path.abspath(sys.argv[1]))
+   import paperclip_r2_backup as backup
+   import database_snapshots as snapshots
+   cfg = backup.load_config()
+   source = next(s for s in cfg.sources if s.name == 'hindsight')
+   target = dataclasses.replace(source, database='hindsight_recovered',
+                                container='', service='hindsight-recovery')
+   with open(os.path.join(sys.argv[2], 'isolated-validation.json')) as stream:
+       receipt = json.load(stream)
+   if receipt['dump_sha256'] != snapshots.sha256(os.path.join(sys.argv[2], 'dump.pgcustom')):
+       raise SystemExit('validated dump changed')
+   if snapshots.metadata(target) != {k: receipt[k] for k in ('counts', 'schema_head')}:
+       raise SystemExit('persistent recovery metadata mismatch')
+   PY
+   ```
+
+   The private validation receipt retains the snapshot counts/head returned by
+   the bounded parser; no general archive extraction is needed. Record the
+   comparison result privately. Keep the replacement empty of
+   application writes until parity passes. Then follow the separately approved
+   Hindsight configuration/cutover and health/known-record checks; any required
+   version upgrade/migration needs its own approved sequence. Preserve the old
+   database until acceptance and the agreed rollback expiry. Retain hashes,
+   timestamps, image and target identity, parity and health evidence privately;
+   remove only the approved plaintext recovery directory once no longer needed.
+
 ### Install/upgrade (Operator only, after merged-source and production acceptance)
 
 1. Keep the current installation as the rollback target: record its revision and
@@ -210,17 +348,32 @@ restored sequentially, never with overlapping target memory allocations.
 - Child stderr is suppressed because clients can echo connection strings or row
   data; failure receipts deliberately contain a safe error, not raw stderr.
   Do not enable client debug logging or attach DB logs to public CI artifacts.
-- Temporary plaintext files are private and removed on success, exceptions and
-  handled SIGTERM/SIGINT. The unit provides a two-minute SIGTERM cleanup window,
-  a six-hour hard limit and no automatic restart. A shared nonblocking lock prevents
-  overlapping backup/retention/drill invocations; overlap exits rather than queues.
-- SIGKILL, daemon loss or a host crash cannot run Python cleanup. Operator checks
-  `docker ps -a --filter label=offsite-restore=true`, inspects ownership before
-  removing only the matching abandoned target with `docker rm -fv <name>`, and
-  removes only verified abandoned `build-`/`drill-` directories after confirming
-  no operation holds `operation.lock`. Never run global Docker or cache pruning.
-  Cleanup failure yields no success receipt. A failed weekly drill needs an explicit
-  authorized retry; the next daily backup does not erase its failure receipt.
+- Temporary plaintext files are private. Cleanup is attempted on normal return,
+  exceptions and handled SIGTERM/SIGINT, but build-directory removal is **best
+  effort**: a successful backup/status can coexist with leftover plaintext in a
+  `build-` directory. Restore-container cleanup is different: failure to remove
+  the target fails the drill before a success receipt. Drill-directory removal
+  errors also fail the drill; neither guarantee covers abrupt process/host loss.
+  The unit provides a two-minute SIGTERM cleanup allowance, a six-hour total limit
+  and no automatic restart. Direct CLI calls have per-child timeouts, not that
+  unit-wide deadline. A shared nonblocking lock prevents overlapping managed
+  backup/retention/drill invocations; overlap exits rather than queues.
+- After **normal runs too**, and after SIGKILL, daemon loss or host crash, Operator
+  inspects the configured `BACKUP_TMP_DIR` (default
+  `~/.cache/paperclip-r2-backup`) for abandoned `build-`/`drill-` directories. Stop
+  the timer, allow the service to finish, and acquire/hold the existing
+  `operation.lock` exclusively and nonblockingly throughout inspection/removal;
+  a lock file's presence or absence alone does not prove inactivity. Confirm no
+  direct/manual recovery is using the files. Check canonical paths, ownership,
+  permissions and run timestamps; do not follow symlinks or remove the cache root,
+  lock file, receipts or unrelated directories. Remove only individually verified
+  abandoned directories, then verify their removal before releasing the lock.
+  Also check `docker ps -a --filter label=offsite-restore=true`, inspect ownership
+  and run identity, and remove only the matching abandoned target with
+  `docker rm -fv <name>`. Never run global Docker or cache pruning. Record cleanup
+  evidence privately and restart the timer only through its authorized path.
+  A failed weekly drill needs an explicit authorized retry; the next daily backup
+  does not erase its failure receipt.
 - Actions fixtures exercise PG17 and pgvector/PG18, mutation after metadata but
   before dump, offsite corruption, manifest/path rejection, failure propagation
   and cleanup. Run/job links for the exact head and the
