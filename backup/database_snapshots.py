@@ -442,6 +442,12 @@ def restore_and_compare(source, dump, manifest):
     return actual
 
 
+def status_replacement_bytes(objects, key, data):
+    """Aggregate managed bytes after replacing one status object."""
+    previous = sum(obj.size for obj in objects if obj.key == key)
+    return sum(obj.size for obj in objects) + len(data) - previous
+
+
 def drill(cfg, rc, now):
     clock_start = utc_now()
     start_tick = time.monotonic()
@@ -497,8 +503,7 @@ def drill(cfg, rc, now):
         # replacement delta, including status objects, also for standalone drills.
         objects = [obj for prefix in ("db/", "instance/", *PREFIXES, "status/")
                    for obj in rc.list(prefix)]
-        previous = sum(obj.size for obj in objects if obj.key == "status/restore-last.json")
-        if sum(obj.size for obj in objects) + len(data) - previous > cfg.cap_bytes:
+        if status_replacement_bytes(objects, "status/restore-last.json", data) > cfg.cap_bytes:
             raise SnapshotError("restore receipt would exceed aggregate storage cap")
     except Exception:
         receipt["ok"] = False
