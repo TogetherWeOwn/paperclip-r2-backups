@@ -565,6 +565,22 @@ class InheritedBoundaryTests(RunFixture):
         self.assertEqual(rc.uploaded, [])
         self.assertEqual(rc.deleted, [])
 
+    def test_cap_recovery_delete_failure_does_not_advise_fresh_backup(self):
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 3, 0, 0
+        self.cfg.max_deletes = 2
+        self.cfg.cap_bytes = 100
+        rc = FakeRclone(objs_for([T(2026, 11, 1, 4) - dt.timedelta(days=i) for i in range(20)], 50))
+        before = dict(rc.store)
+        with mock.patch.object(rc, "delete", side_effect=b.BackupError("deletion denied")) as delete, \
+                mock.patch.object(b, "log") as logged:
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
+        messages = "\n".join(call.args[0] for call in logged.call_args_list)
+        self.assertIn("retention skipped: deletion denied", messages)
+        self.assertNotIn("cap recovery requires a fresh", messages)
+        delete.assert_called_once()
+        self.assertEqual(rc.uploaded, [])
+        self.assertEqual(rc.store, before)
+
     def test_dry_run_reserves_real_status_growth_without_writes(self):
         dump = os.path.join(self.backups, os.listdir(self.backups)[0])
         instance = f"instance/{self.now:%Y/%m/%d}/paperclip-instance-{self.now:%Y%m%d-%H%M%S}.tar.gz"

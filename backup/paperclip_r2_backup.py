@@ -663,11 +663,15 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                     # Proposed uploads do not exist on this path. Even a run
                     # with nothing to upload must not prune stale recovery points.
                     check_offsite_freshness(cfg, existing, now, dry_run)
-                    apply_retention(compute_retention(cfg, existing, now, True),
-                                    rc, status, dry_run)
                 except BackupError as exc:
                     log(f"retention skipped: {exc}; cap recovery requires a fresh "
                         "offsite backup or reviewed manual cleanup; do not relax safety rails")
+                else:
+                    try:
+                        apply_retention(compute_retention(cfg, existing, now, True),
+                                        rc, status, dry_run)
+                    except BackupError as exc:
+                        log(f"retention skipped: {exc}")
             raise _Stop()
 
         if not dry_run:
