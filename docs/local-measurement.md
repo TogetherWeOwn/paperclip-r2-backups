@@ -107,6 +107,39 @@ reclamation contract and later authorized reconciliation can deal with that case
 Do not erase/recreate the lock to get past the latch. Recovery snippets and the
 old installed writer are not retroactively made latch-aware by this source.
 
+### Legacy operation-lock upgrade prerequisite
+
+All revised backup, drill and measurement writers require
+`BACKUP_TMP_DIR/operation.lock` to be a nonsymlink regular file, owned by the
+executing effective user, with exactly one hard link and no group/other permission
+bits (private mode `0600` is the intended read/write mode). The previous append-open
+lock implementation did not validate these properties. An existing legacy lock
+may therefore be rejected after upgrade; for example, mode `0640`, including one
+inherited from a permissive directory default ACL, fails the private-file check.
+The `0600` creation argument applies only to a new file; it does not repair an
+existing file. This is a conditional compatibility prerequisite, not evidence of
+any deployed lock's permissions or ACLs.
+
+The error `operation lock must be a private owned regular file` is a file-property
+failure **before** latch inspection. It does not establish whether residual
+plaintext or a cleanup-pending marker exists. A later, separately authorized
+Operator-owned reconciliation for an otherwise owned regular single-link legacy
+lock may restrict its permissions to `0600` only after safe file identity and writer
+exclusion have been established. It must preserve the same inode and every byte,
+including any cleanup-pending marker. Do not automatically chmod, truncate, unlink,
+replace or recreate the lock, change its ownership, or weaken the rejection. An
+unexpected owner, symlink, file type or link count requires separate investigation,
+not a permissions-only repair.
+
+Permissions reconciliation does **not** reconcile residual cleanup. Once the file
+passes validation and the lock is acquired, any nonempty content still produces
+`operation lock requires authorized residual cleanup reconciliation`; only the
+separately authorized client/plaintext cleanup reconciliation described above can
+clear that latch. A permissions fix alone proves neither cleanup nor readiness
+for another source. This document supplies no command or authorization to inspect
+or change a host lock. All host preparation, installation and live-operation NO-GO
+restrictions remain unchanged, and source merge does not authorize reconciliation.
+
 ## Local receipt and scratch accounting
 
 Receipts are exclusive-create, mode 0600 under an existing private receipt
