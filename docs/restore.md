@@ -196,7 +196,7 @@ No live recovery is performed or claimed by this implementation change.
    source = next(s for s in cfg.sources if s.name == 'hindsight')
    if not key.startswith('hindsight/') or not snapshots.BUNDLE.fullmatch(key):
        raise SystemExit('invalid recovery key')
-   with open(os.path.join(cfg.tmp_dir, 'operation.lock'), 'a') as lock:
+   with open(os.path.join(backup._ensure_dir(cfg.tmp_dir), 'operation.lock'), 'a') as lock:
        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
        rc = backup.Rclone(cfg.bucket, cfg.rclone_bin)
        objects = [o for o in rc.list('hindsight/') if o.key == key]
