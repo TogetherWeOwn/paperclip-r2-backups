@@ -543,6 +543,35 @@ class InheritedBoundaryTests(RunFixture):
         self.assertEqual(rc.uploaded, [])
         self.assertLessEqual(sum(rc.store.values()), self.cfg.cap_bytes)
 
+    def test_no_upload_cap_recovery_never_prunes_stale_offsite_backups(self):
+        invoked = T(2026, 11, 3, 2, 30)
+        stamp = T(2026, 11, 2, 23)
+        local = os.path.join(self.backups, f"paperclip-{stamp:%Y%m%d-%H%M%S}.sql.gz")
+        with gzip.open(local, "wb") as stream:
+            stream.write(b"sql")
+        os.utime(local, (invoked.timestamp() - 3600,) * 2)
+        self.clock.return_value = invoked
+        stale = T(2026, 11, 2, 0)
+        objs = objs_for([stale - dt.timedelta(days=i) for i in range(9)])
+        objs += [b.Obj(f"instance/{invoked:%Y/%m/%d}/paperclip-instance-{invoked:%Y%m%d-%H%M%S}.tar.gz", 10),
+                 b.Obj(b.STATUS_KEY, 2)]
+        rc = FakeRclone(objs)
+        self.cfg.cap_bytes = sum(rc.store.values())
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        self.assertEqual(b.run(self.cfg, rc, invoked), b.EXIT_CAP)
+        self.assertEqual(rc.uploaded, [])
+        self.assertEqual(rc.deleted, [])
+
+    def test_dry_run_reserves_real_status_growth_without_writes(self):
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        instance = f"instance/{self.now:%Y/%m/%d}/paperclip-instance-{self.now:%Y%m%d-%H%M%S}.tar.gz"
+        rc = FakeRclone([b.Obj(b.db_key_for(dump), 10), b.Obj(instance, 10), b.Obj(b.STATUS_KEY, 2)])
+        before = dict(rc.store)
+        self.cfg.cap_bytes = sum(rc.store.values()) + 10
+        self.assertEqual(b.run(self.cfg, rc, self.now, dry_run=True), b.EXIT_CAP)
+        self.assertEqual(rc.store, before)
+        self.assertEqual((rc.uploaded, rc.deleted, rc.puts), ([], [], {}))
+
     def test_native_only_clock_faults_fail_before_retention(self):
         for observed, ticks in ((self.now - dt.timedelta(seconds=1), (0, 0, 1)),
                                 (self.now + dt.timedelta(seconds=20), (0, 0, 1))):

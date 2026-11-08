@@ -492,6 +492,22 @@ def check_dump_fresh(dump: str, dump_ts: dt.datetime, now: dt.datetime) -> None:
                           "Paperclip backups appear to have stopped")
 
 
+def check_offsite_freshness(cfg: Config, existing: dict, now: dt.datetime,
+                            dry_run: bool) -> dict:
+    newest_db = newest_ts(existing[DB_PREFIX])
+    if newest_db is None or (now - newest_db).total_seconds() > FRESH_DUMP_SECONDS:
+        raise BackupError("newest offsite database backup is older than 26h")
+    freshness = {}
+    if not dry_run:
+        for source in cfg.sources:
+            stamp = max((ts for _, ts in snapshots.timed_inventory(existing[source.prefix])), default=None)
+            fresh = stamp is not None and 0 <= (now - stamp).total_seconds() < FRESH_DUMP_SECONDS
+            freshness[source.name] = fresh
+            if not fresh:
+                raise BackupError(source.name + ": newest offsite dump is not fresh (<26h)")
+    return freshness
+
+
 def status_data(status: dict) -> bytes:
     return (json.dumps(status, indent=2, sort_keys=True) + "\n").encode()
 
@@ -628,9 +644,11 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             except BackupError as exc:
                 retention_block = str(exc)
         projected = managed + incoming - freed
-        if not dry_run:
-            receipt = dict(status, snapshot_freshness={source.name: True for source in cfg.sources})
-            projected = projected_with_status(receipt, existing, incoming_objs, plans, projected)
+        # Dry-run reserves the real receipt too, without publishing it. New
+        # instance/supplemental data sizes retain the documented estimates.
+        receipt = dict(status, dry_run=False,
+                       snapshot_freshness={source.name: True for source in cfg.sources})
+        projected = projected_with_status(receipt, existing, incoming_objs, plans, projected)
         status["projected_bytes"] = projected
         if projected > cfg.cap_bytes:
             status["error"] = (f"cap reached: projected {projected} (managed {managed} + "
@@ -642,6 +660,9 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             # runs: prune what GFS drops anyway (newest objects stay fresh and kept).
             if not retention_block:
                 try:
+                    # Proposed uploads do not exist on this path. Even a run
+                    # with nothing to upload must not prune stale recovery points.
+                    check_offsite_freshness(cfg, existing, now, dry_run)
                     apply_retention(compute_retention(cfg, existing, now, True),
                                     rc, status, dry_run)
                 except BackupError as exc:
@@ -666,18 +687,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                 raise BackupError("snapshot clock moved backward during upload")
             snapshots.check_clock(clock_start, start_tick, observed, snapshots.time.monotonic())
             now = observed
-        newest_db = newest_ts(existing[DB_PREFIX])
-        if newest_db is None or (now - newest_db).total_seconds() > FRESH_DUMP_SECONDS:
-            raise BackupError("newest offsite database backup is older than 26h")
-
-        status["snapshot_freshness"] = {}
-        if not dry_run:
-            for source in cfg.sources:
-                stamp = max((ts for _, ts in snapshots.timed_inventory(existing[source.prefix])), default=None)
-                fresh = stamp is not None and 0 <= (now - stamp).total_seconds() < FRESH_DUMP_SECONDS
-                status["snapshot_freshness"][source.name] = fresh
-                if not fresh:
-                    raise BackupError(source.name + ": newest offsite dump is not fresh (<26h)")
+        status["snapshot_freshness"] = check_offsite_freshness(cfg, existing, now, dry_run)
 
         # d) retention (only reached after every upload was verified)
         if retention_block:
