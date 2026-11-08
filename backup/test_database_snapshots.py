@@ -237,9 +237,10 @@ class SnapshotTests(unittest.TestCase):
     def test_drill_downloads_offsite_and_writes_both_receipts(self):
         paths = {name: self.bundle(name) for name in ("paperclip", "hindsight")}
         store = mock.Mock()
-        store.list.side_effect = lambda prefix: ([b.Obj(paths[prefix[:-1]][1],
-                                                            os.path.getsize(paths[prefix[:-1]][0]))]
-                                                if prefix[:-1] in paths else [])
+        store.list.side_effect = lambda prefix: ([
+            b.Obj(paths[prefix[:-1]][1], os.path.getsize(paths[prefix[:-1]][0])),
+            b.Obj(f"{prefix}2026/02/30/{prefix[:-1]}-20260230-042000-snapshot.tar", 1)]
+            if prefix[:-1] in paths else [])
         store.download.side_effect = lambda key, dest, limit: shutil.copyfile(paths[key.split('/')[0]][0], dest)
         cfg = b.Config("fixture", "", "", tmp_dir=self.root, receipt_dir=self.root,
                        sources=(source("paperclip"), source("hindsight")))
@@ -453,6 +454,46 @@ class BackupSnapshotTests(RunFixture):
         with self.assertRaises(s.SnapshotError):
             s.require_preincident(manifest, key, self.now + dt.timedelta(minutes=40))
         self.assertTrue(rc.puts[b.STATUS_KEY]["snapshot_freshness"]["hindsight"])
+
+    def test_midnight_upload_uses_admitted_deletion_plan(self):
+        self.configure()
+        before = NOW.replace(hour=23, minute=59, second=59)
+        after = before + dt.timedelta(seconds=2)
+        stamp = before - dt.timedelta(minutes=15)
+        native = os.path.join(self.backups, f"paperclip-{stamp:%Y%m%d-%H%M%S}.sql.gz")
+        import gzip
+        with gzip.open(native, "wb") as stream:
+            stream.write(b"fixture")
+        os.utime(native, (stamp.timestamp(),) * 2)
+        mib = 1024**2
+        stamps = (before.replace(month=10, day=30), before.replace(day=3),
+                  before.replace(day=6), before.replace(day=7), before.replace(hour=12))
+        objs = [b.Obj(s.timing_key("hindsight", t), mib * size)
+                for t, size in zip(stamps, (1, 100, 1, 1, 1))]
+        # Native/instance already present: exactly two small supplemental uploads.
+        objs += [b.Obj(b.db_key_for(native), 1),
+                 b.Obj(f"instance/{before:%Y/%m/%d}/paperclip-instance-{before:%Y%m%d-%H%M%S}.tar.gz", 1)]
+        rc = FakeRclone(objs)
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 2, 0
+        self.cfg.max_deletes = 1
+        self.cfg.cap_bytes = sum(o.size for o in objs) + 2 * len(b"snapshot fixture") - 100 * mib
+        with mock.patch.object(s, "capture", side_effect=self.capture), \
+                mock.patch.object(s, "utc_now", side_effect=(before, before, after)), \
+                mock.patch.object(s.time, "monotonic", side_effect=(0, 0, 2)):
+            self.assertEqual(b.run(self.cfg, rc, before), 0)
+        self.assertEqual(rc.deleted, [objs[1].key])
+        self.assertLessEqual(sum(rc.store.values()), self.cfg.cap_bytes)
+
+    def test_malformed_timed_keys_do_not_block_upload_or_get_deleted(self):
+        self.configure()
+        malformed = ("hindsight/2026/02/30/hindsight-20260230-042000-snapshot.tar",
+                     "paperclip/2026/11/01/paperclip-20261102-042000-snapshot.tar")
+        rc = FakeRclone([b.Obj(key, 10) for key in malformed])
+        with mock.patch.object(s, "capture", side_effect=self.capture):
+            self.assertEqual(b.run(self.cfg, rc, self.now), 0)
+        self.assertEqual(len(rc.uploaded), 4)
+        self.assertFalse(set(malformed) & set(rc.deleted))
+        self.assertTrue(set(malformed).issubset(rc.store))
 
     def test_backward_observation_clock_prevents_upload_and_retention(self):
         self.configure()

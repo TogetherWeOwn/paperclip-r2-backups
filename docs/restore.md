@@ -122,10 +122,15 @@ The host clock must be accurately synchronized to UTC and remain stable; inciden
 cutoffs must use the same time basis. The tools reject backward intervals, naive or
 malformed timestamps, and observed wall-clock/monotonic elapsed-time discrepancies
 over one second during export and backup processing. These checks cannot establish
-UTC accuracy or detect every clock correction. If clock accuracy/skew is uncertain,
-do not claim pre-incident safety: independently establish timing or choose a proven
-earlier point through incident approval. Cross-database captures are independent,
-not one atomic recovery point.
+UTC accuracy or detect every clock correction. Wall and monotonic samples are not
+atomic: an asymmetric scheduling pause between samples can conservatively reject a
+valid capture. If clock accuracy/skew is uncertain, do not claim pre-incident safety:
+independently establish timing or choose a proven earlier point through incident
+approval. Cross-database captures are independent, not one atomic recovery point.
+The interval bounds PostgreSQL's MVCC snapshot, not every non-MVCC state item in a
+logical dump. In particular sequence state can change after acquisition; the count/
+schema-head comparison does not prove sequence state predates an incident. Recovery
+approval must consider incident-related sequence changes separately.
 
 The manifest `timestamp` is the full-precision **lower bound**, not an exact snapshot
 instant. New `-snapshot.tar` keys and their UTC date directories encode that lower
@@ -135,7 +140,12 @@ use its conservative second floor; a second-floor boundary can reject freshness 
 to one second early. Observation time is refreshed after capture/upload and restore,
 not frozen at invocation. GFS chooses the newest lower-bound key per retained UTC
 day/week/month and retains the newest three timed bundles; it makes no stronger
-claim about ordering actual acquisitions inside overlapping intervals.
+claim about ordering actual acquisitions inside overlapping intervals. Capacity
+admission and post-verification pruning use the **same saved deletion plan**, even
+when upload crosses a UTC GFS window boundary. Malformed listed keys (invalid dates
+or date-directory mismatches) remain cap-accounted and untouched, but cannot poison
+valid backup uploads or drill selection. A specifically selected key/manifest still
+must pass strict timing validation; skipping malformed inventory is not acceptance.
 
 Pre-incident eligibility requires the validated **upper bound strictly before** the
 incident cutoff. Equality or an interval straddling the cutoff fails, even when the

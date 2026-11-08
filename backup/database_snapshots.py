@@ -77,6 +77,19 @@ def key_lower_bound(key):
     return lower
 
 
+def timed_inventory(objects):
+    # A malformed/legacy listed key is not evidence of timing and must not poison
+    # unrelated uploads. Keep its bytes cap-accounted, but never select or prune it.
+    result = []
+    for obj in objects:
+        try:
+            lower = key_lower_bound(obj.key)
+        except SnapshotError:
+            continue
+        result.append((obj, lower))
+    return result
+
+
 def validate_timing(manifest, key=None):
     if manifest.get("version") != 2:
         raise SnapshotError("legacy snapshot timing is uncertain; no pre-incident guarantee")
@@ -439,15 +452,15 @@ def drill(cfg, rc, now):
         if {s.name for s in cfg.sources} != {"paperclip", "hindsight"}:
             raise SnapshotError("restore drill requires both database sources")
         for source in cfg.sources:
-            candidates = [o for o in rc.list(source.prefix) if TIMED_BUNDLE.fullmatch(o.key)]
+            candidates = timed_inventory(rc.list(source.prefix))
             if not candidates:
                 raise SnapshotError(source.name + ": no offsite snapshot with substantiated timing")
-            obj = max(candidates, key=lambda o: (key_lower_bound(o.key), o.key))
+            obj, lower = max(candidates, key=lambda item: (item[1], item[0].key))
             # Reject obviously stale keys before download; the validated manifest
             # interval, not the key alone, governs eligibility after download.
             observed = utc_now()
             check_clock(clock_start, start_tick, observed, time.monotonic())
-            if observed < now or not 0 <= (observed - key_lower_bound(obj.key)).total_seconds() < 26 * 3600:
+            if observed < now or not 0 <= (observed - lower).total_seconds() < 26 * 3600:
                 raise SnapshotError(source.name + ": newest offsite snapshot is not fresh (<26h)")
             if not 0 < obj.size <= cfg.cap_bytes:
                 raise SnapshotError("offsite snapshot exceeds download cap")

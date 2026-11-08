@@ -291,20 +291,13 @@ def plan_retention(objs: list[Obj], now: dt.datetime, retention: tuple[int, int,
     """Decide deletions for one prefix, enforcing every safety rail."""
     if prefix not in DELETABLE_PREFIXES:
         raise BackupError("retention called for non-deletable prefix")
-    items = []
-    for o in objs:
-        if not o.key.startswith(prefix):
-            raise BackupError("object outside prefix passed to retention")
-        if prefix in snapshots.PREFIXES:
-            # Invocation-dated legacy bundles have unknown acquisition time. Keep
-            # them untouched; only the distinct timed format participates in GFS.
-            if not snapshots.TIMED_BUNDLE.fullmatch(o.key):
-                continue
-            ts = snapshots.key_lower_bound(o.key)
-        else:
-            ts = key_timestamp(o.key)
-        if ts is not None:  # unparseable keys are never touched
-            items.append((o.key, ts))
+    if any(not o.key.startswith(prefix) for o in objs):
+        raise BackupError("object outside prefix passed to retention")
+    if prefix in snapshots.PREFIXES:
+        # Legacy and malformed keys remain untouched, outside the timed GFS floor.
+        items = [(o.key, ts) for o, ts in snapshots.timed_inventory(objs)]
+    else:
+        items = [(o.key, ts) for o in objs if (ts := key_timestamp(o.key)) is not None]
     plan = RetentionPlan(kept=len(items))
     if not upload_ok:
         plan.skipped_reason = "upload step did not succeed"
@@ -539,8 +532,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
 
         # Snapshot-bound supplemental DB bundles. Native Paperclip SQL is unchanged.
         for source in cfg.sources:
-            source_objects = [o for o in existing[source.prefix] if snapshots.TIMED_BUNDLE.fullmatch(o.key)]
-            prior = max((snapshots.key_lower_bound(o.key) for o in source_objects), default=None)
+            prior = max((ts for _, ts in snapshots.timed_inventory(existing[source.prefix])), default=None)
             if prior and (prior - now).total_seconds() > FUTURE_SKEW_SECONDS:
                 raise BackupError(source.name + ": offsite snapshot dated in the future")
             if prior and (now - prior).total_seconds() > MAX_FORWARD_JUMP_SECONDS:
@@ -649,8 +641,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         status["snapshot_freshness"] = {}
         if not dry_run:
             for source in cfg.sources:
-                stamp = max((snapshots.key_lower_bound(o.key) for o in existing[source.prefix]
-                             if snapshots.TIMED_BUNDLE.fullmatch(o.key)), default=None)
+                stamp = max((ts for _, ts in snapshots.timed_inventory(existing[source.prefix])), default=None)
                 fresh = stamp is not None and 0 <= (now - stamp).total_seconds() < FRESH_DUMP_SECONDS
                 status["snapshot_freshness"][source.name] = fresh
                 if not fresh:
@@ -659,7 +650,9 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         # d) retention (only reached after every upload was verified)
         if retention_block:
             raise BackupError(retention_block)
-        apply_retention(compute_retention(cfg, existing, now, True), rc, status, dry_run)
+        # Apply exactly the plan credited by capacity admission. The refreshed
+        # freshness clock may cross a GFS boundary and change which bytes expire.
+        apply_retention(plans, rc, status, dry_run)
         status["ok"] = True
         status["exit_code"] = code = EXIT_OK
     except _Stop:
