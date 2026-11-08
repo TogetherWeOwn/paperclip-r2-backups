@@ -13,6 +13,7 @@ Offsite backups of a self-hosted [Paperclip](https://github.com/paperclipai/pape
   - It runs behind Cloudflare Access and checks the Access JWT itself, including `aud`.
   - It has CSRF checks, disables share links, and only allows writes under the backup prefixes.
 - **`docs/restore.md`**: how to restore from these backups.
+- **[Local measurement boundary](docs/local-measurement.md)**: separate capture-only CLI and fixture-tested cleanup/receipt lifecycle. Execution remains **NO-GO** until a reviewed native supervision/admission verifier proves the full backend, scratch, I/O and exclusion contract. No host preparation or live capture is authorized by this source.
 
 Backups are stored as plain `.sql.gz` / `.tar.gz` objects. R2 encrypts them at rest, and access is limited to the bucket-scoped token and the Access-protected console. The instance master key is **not** included by default (`INCLUDE_SECRETS=false`). A restore needs both the dump and the master key, so keep the key in a password manager.
 
