@@ -14,18 +14,19 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   changes:
-    uses: TogetherWeOwn/.github/.github/workflows/changes.yml@20d95fd8c249c7192c364f8b41519fca3fc873df
+    uses: TogetherWeOwn/.github/.github/workflows/changes.yml@d427f7212f478ea3823a605edb394b0722e152b5 # v0.6.0
     with:
       areas-json: '{"backup":["backup/**"],"docs":["*.md","docs/**"],"worker":["worker/**"]}'
       docs-areas-json: '["docs"]'
       full-run-globs-json: '[".github/**","**/package.json","package.json","**/package-lock.json","package-lock.json","**/tsconfig*.json","tsconfig*.json"]'
   security:
     permissions:
-      actions: read
+      actions: read # Download OSV comparison artifacts for validation.
       contents: read
-      security-events: write
-    uses: TogetherWeOwn/.github/.github/workflows/public-pr-security.yml@20d95fd8c249c7192c364f8b41519fca3fc873df
+      security-events: write # Upload the pinned OSV scanner's SARIF evidence.
+    uses: TogetherWeOwn/.github/.github/workflows/public-pr-security.yml@d427f7212f478ea3823a605edb394b0722e152b5 # v0.6.0
   unit:
+    name: Unit and negative-path tests
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -36,6 +37,7 @@ jobs:
       - name: Python unit and negative-path tests
         run: python3 -m unittest discover -s backup -v
   restore-fixtures:
+    name: Offsite restore fixtures
     needs: changes
     if: needs.changes.outputs.full_run == 'true' || (fromJSON(needs.changes.outputs.areas).backup && (github.event_name != 'pull_request' || github.event.pull_request.draft == false))
     runs-on: ubuntu-24.04
@@ -69,6 +71,7 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
   ci-ok:
+    name: ci-ok
     if: always()
     needs: [changes, security, unit, restore-fixtures]
     runs-on: ubuntu-24.04

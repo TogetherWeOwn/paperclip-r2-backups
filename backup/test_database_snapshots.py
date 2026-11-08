@@ -77,9 +77,9 @@ class SnapshotTests(unittest.TestCase):
             s.unpack(path, self.root, source())
 
     def test_inventory_rejects_duplicate_table_keys(self):
-        response = ('{"table":"x","count":1}\\n'
-                    '{"table":"x","count":2}\\n'
-                    '{"schema_head":[{"version_num":"h"}]}\\n')
+        response = ('{"table":"x","count":1}\n'
+                    '{"table":"x","count":2}\n'
+                    '{"schema_head":[{"version_num":"h"}]}\n')
         with mock.patch.object(s, "sql", return_value=response):
             with self.assertRaisesRegex(s.SnapshotError, "duplicate"):
                 s.metadata(source())

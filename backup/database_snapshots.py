@@ -136,7 +136,7 @@ def metadata(source, snapshot=None):
             raise SnapshotError("invalid exported snapshot id")
         begin += "SET TRANSACTION SNAPSHOT '" + snapshot + "';\n"
     # gexec quotes identifiers on the server; counts are exact, never estimates.
-    text = begin + """
+    text = begin + r"""
 SELECT format('SELECT json_build_object(''table'', %L, ''count'', count(*)) FROM %I.%I;',
               format('%I.%I', n.nspname, c.relname), n.nspname, c.relname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
