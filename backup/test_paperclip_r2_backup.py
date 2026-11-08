@@ -456,7 +456,8 @@ class NativeRetryTests(RunFixture):
         uploaded = list(rc.uploaded)
         rc.verified.clear()
 
-        self.assertEqual(b.run(self.cfg, rc, self.now + dt.timedelta(minutes=5)), b.EXIT_ERROR)
+        self.clock.return_value = self.now + dt.timedelta(minutes=5)
+        self.assertEqual(b.run(self.cfg, rc, self.clock.return_value), b.EXIT_ERROR)
         self.assertEqual(rc.verified, [self.key])
         self.assertEqual(rc.uploaded, uploaded)
         self.assertEqual(rc.deleted, [])
@@ -465,7 +466,8 @@ class NativeRetryTests(RunFixture):
 
         rc.fail_verify = False
         rc.verified.clear()
-        self.assertEqual(b.run(self.cfg, rc, self.now + dt.timedelta(minutes=10)), b.EXIT_OK)
+        self.clock.return_value = self.now + dt.timedelta(minutes=10)
+        self.assertEqual(b.run(self.cfg, rc, self.clock.return_value), b.EXIT_OK)
         self.assertEqual(rc.verified[0], self.key)
         self.assertEqual(rc.uploaded.count(self.key), 1)  # verified without reuploading
         self.assertTrue(rc.puts[b.STATUS_KEY]["ok"])
@@ -517,11 +519,13 @@ class NativeRetryTests(RunFixture):
         for same_day in ([], objs_for([T(2026, 11, 2, 0)])):
             with self.subTest(same_day=bool(same_day)):
                 rc = NativeIntegrityRclone(self.old + same_day)
+                before = dict(rc.store)
                 self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
                 self.assertEqual(rc.verified, [])
                 self.assertEqual(rc.uploaded, [])
                 self.assertEqual(rc.deleted, [])
-                self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
+                self.assertNotIn(b.STATUS_KEY, rc.puts)
+                self.assertEqual(rc.store, before)
 
     def test_real_verifier_rejects_size_and_checksum_failures(self):
         from unittest import mock
