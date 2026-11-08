@@ -393,6 +393,16 @@ class BackupSnapshotTests(RunFixture):
         self.assertEqual(rc.deleted, [])
         self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
 
+    def test_template_keeps_snapshots_opt_in(self):
+        path = os.path.join(os.path.dirname(__file__), "env.example")
+        with open(path) as stream:
+            env = dict(line.strip().split("=", 1) for line in stream
+                       if line.strip() and not line.lstrip().startswith("#"))
+        with mock.patch.object(s, "load_sources") as load_sources:
+            cfg = b.load_config(env)
+        self.assertEqual(cfg.sources, ())
+        load_sources.assert_not_called()
+
     def test_snapshot_capture_failure_does_not_delete_or_upload(self):
         self.configure()
         rc = FakeRclone()

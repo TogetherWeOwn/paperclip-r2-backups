@@ -91,8 +91,15 @@ With `SNAPSHOT_BACKUPS=true`, the daily run additionally creates:
 
 Each uncompressed tar contains exactly `dump.pgcustom` (`pg_dump -Fc`, internally
 compressed) and `manifest.json`. No master key is added. Native Paperclip `db/`
-SQL uploads and instance snapshots continue unchanged. Legacy SQL dumps have no
-source-snapshot manifest and are **not** claimed as snapshot-verified by this drill.
+SQL and instance snapshot formats are unchanged, but enabling supplemental capture
+couples their upload availability to both sources: **any capture failure stops the
+whole run before uploads or retention**, including native uploads. This is the
+current fail-closed planning contract, not per-source failure isolation. During a
+source outage, offsite native history can therefore fall behind even while local
+native dumps continue. The template defaults to `SNAPSHOT_BACKUPS=false`; enable it
+only after both source configurations and capacity have been admitted and verified.
+Legacy SQL dumps have no source-snapshot manifest and are **not** claimed as
+snapshot-verified by this drill.
 The supplemental Paperclip dump is necessary to compare independently measured
 source counts rather than to derive the expected answer from a restored dump.
 
