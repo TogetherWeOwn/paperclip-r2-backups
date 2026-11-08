@@ -66,6 +66,42 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(manifest["dump_sha256"], s.sha256(dump))
         self.assertEqual(manifest["counts"], expected()["counts"])
 
+    def test_unpack_rejects_extended_headers_without_expanding_them(self):
+        path = os.path.join(self.root, "extended.tar")
+        header = tarfile.TarInfo("metadata")
+        header.type = tarfile.XHDTYPE
+        header.size = 1024**3
+        with open(path, "wb") as stream:
+            stream.write(header.tobuf())
+        with self.assertRaises(s.SnapshotError):
+            s.unpack(path, self.root, source())
+
+    def test_inventory_rejects_duplicate_table_keys(self):
+        response = ('{"table":"x","count":1}\\n'
+                    '{"table":"x","count":2}\\n'
+                    '{"schema_head":[{"version_num":"h"}]}\\n')
+        with mock.patch.object(s, "sql", return_value=response):
+            with self.assertRaisesRegex(s.SnapshotError, "duplicate"):
+                s.metadata(source())
+
+    def test_readiness_requires_final_server_tcp(self):
+        with mock.patch.object(s, "execute", return_value=b"ok") as execute:
+            with s.restore_container(IMAGE):
+                pass
+        readiness = execute.call_args_list[1].args[0][-1]
+        self.assertIn("-h 127.0.0.1", readiness)
+
+    def test_receipt_publication_respects_cap_and_keeps_local_failure(self):
+        store = mock.Mock()
+        store.list.side_effect = lambda prefix: [b.Obj(prefix + "existing", 1)]
+        cfg = b.Config("fixture", "", "", cap_bytes=1, tmp_dir=self.root,
+                       receipt_dir=self.root, sources=())
+        self.assertEqual(s.drill(cfg, store, NOW), 1)
+        store.put_bytes.assert_not_called()
+        receipt_path = os.path.join(self.root, "restore-20261108-042000.json")
+        with open(receipt_path) as stream:
+            self.assertFalse(json.load(stream)["ok"])
+
     def test_corrupt_dump_hash_fails_closed(self):
         path, _ = self.bundle()
         with open(path, "r+b") as stream:
@@ -168,8 +204,9 @@ class SnapshotTests(unittest.TestCase):
     def test_drill_downloads_offsite_and_writes_both_receipts(self):
         paths = {name: self.bundle(name) for name in ("paperclip", "hindsight")}
         store = mock.Mock()
-        store.list.side_effect = lambda prefix: [b.Obj(paths[prefix[:-1]][1],
+        store.list.side_effect = lambda prefix: ([b.Obj(paths[prefix[:-1]][1],
                                                             os.path.getsize(paths[prefix[:-1]][0]))]
+                                                if prefix[:-1] in paths else [])
         store.download.side_effect = lambda key, dest, limit: shutil.copyfile(paths[key.split('/')[0]][0], dest)
         cfg = b.Config("fixture", "", "", tmp_dir=self.root, receipt_dir=self.root,
                        sources=(source("paperclip"), source("hindsight")))
@@ -217,6 +254,21 @@ class BackupSnapshotTests(RunFixture):
         self.assertEqual(rc.puts[b.STATUS_KEY]["snapshot_freshness"],
                          {"paperclip": True, "hindsight": True})
         self.assertFalse(os.listdir(self.tmp))
+
+    def test_same_day_retry_recaptures_and_verifies_after_failed_verification(self):
+        self.configure()
+        rc = FakeRclone(fail_verify=True)
+        with mock.patch.object(s, "capture", side_effect=self.capture) as capture:
+            self.assertEqual(b.run(self.cfg, rc, self.now), 1)
+            # Simulate the snapshot object left behind by a failed verify. Merely
+            # seeing this key must not let the retry bypass capture/verification.
+            for src in self.cfg.sources:
+                rc.store[f"{src.prefix}{self.now:%Y/%m/%d}/{src.name}-{self.now:%Y%m%d-%H%M%S}.tar"] = 1
+            capture.reset_mock()
+            self.assertEqual(b.run(self.cfg, rc, self.now + dt.timedelta(minutes=5)), 1)
+            self.assertEqual(capture.call_count, 2)
+        self.assertEqual(rc.deleted, [])
+        self.assertFalse(rc.puts[b.STATUS_KEY]["ok"])
 
     def test_snapshot_capture_failure_does_not_delete_or_upload(self):
         self.configure()

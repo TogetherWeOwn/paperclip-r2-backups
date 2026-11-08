@@ -538,8 +538,9 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                 raise BackupError(source.name + ": offsite snapshot dated in the future")
             if prior and (now - prior).total_seconds() > MAX_FORWARD_JUMP_SECONDS:
                 retention_block = "retention skipped: snapshot clock jump or extended backup gap"
-            if day_has_object(source_objects, today):
-                continue
+            # Presence is not evidence of successful verification: a previous
+            # upload may have succeeded before its verify failed. Every invocation
+            # captures and verifies fresh bundles, including same-day retries.
             if dry_run:
                 # New dumps cannot be sized without reading the source. No DB access
                 # in dry-run; the real run sizes all bundles before its cap decision.

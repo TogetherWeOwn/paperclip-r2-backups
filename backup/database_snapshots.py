@@ -138,9 +138,9 @@ def metadata(source, snapshot=None):
     # gexec quotes identifiers on the server; counts are exact, never estimates.
     text = begin + """
 SELECT format('SELECT json_build_object(''table'', %L, ''count'', count(*)) FROM %I.%I;',
-              n.nspname || '.' || c.relname, n.nspname, c.relname)
+              format('%I.%I', n.nspname, c.relname), n.nspname, c.relname)
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind IN ('r', 'p') AND n.nspname NOT LIKE 'pg_%'
+WHERE c.relkind IN ('r', 'p') AND left(n.nspname, 3) <> 'pg_'
   AND n.nspname <> 'information_schema'
 ORDER BY n.nspname, c.relname
 \gexec
@@ -151,7 +151,10 @@ ORDER BY n.nspname, c.relname
              "ORDER BY to_jsonb(h)::text), '[]'::jsonb)) FROM (SELECT " + columns +
              " FROM " + table + ") h;\nCOMMIT;\n")
     lines = [json.loads(line) for line in sql(source, text).splitlines() if line]
-    counts = {line["table"]: line["count"] for line in lines if "table" in line}
+    tables = [line for line in lines if "table" in line]
+    counts = {line["table"]: line["count"] for line in tables}
+    if len(counts) != len(tables):
+        raise SnapshotError("duplicate table inventory key")
     heads = [line["schema_head"] for line in lines if "schema_head" in line]
     if not counts or len(heads) != 1 or not heads[0]:
         raise SnapshotError("empty table inventory or schema head")
@@ -221,27 +224,53 @@ def capture(source, now, dest):
     with open(manifest_path, "wb") as stream:
         stream.write(encoded)
     path = os.path.join(dest, f"{source.name}-{now:%Y%m%d-%H%M%S}.tar")
-    with tarfile.open(path, "w") as archive:
+    with tarfile.open(path, "w", format=tarfile.GNU_FORMAT) as archive:
         archive.add(dump, arcname="dump.pgcustom")
         archive.add(manifest_path, arcname="manifest.json")
     return path, f"{source.prefix}{now:%Y/%m/%d}/{os.path.basename(path)}"
 
 
 def unpack(path, dest, source):
-    # Never extract paths/links from remote tar metadata. Only two regular members.
-    with tarfile.open(path, "r:") as archive:
-        members = archive.getmembers()
-        if (len(members) != 2 or {m.name for m in members} != {"dump.pgcustom", "manifest.json"}
-                or any(not m.isfile() or m.issparse() for m in members)
-                or sum(m.size for m in members) > os.path.getsize(path)):
-            raise SnapshotError("invalid snapshot bundle members")
-        member = archive.getmember("manifest.json")
-        if member.size > MANIFEST_LIMIT:
-            raise SnapshotError("snapshot manifest exceeds limit")
-        manifest = json.load(archive.extractfile(member))
-        dump = os.path.join(dest, "dump.pgcustom")
-        with archive.extractfile("dump.pgcustom") as src, open(dump, "wb") as dst:
-            shutil.copyfileobj(src, dst, 1024**2)
+    # Read exactly two fixed-size headers ourselves. TarFile.next/getmembers can
+    # expand arbitrarily large PAX/GNU metadata before exposing a member to validate.
+    dump = os.path.join(dest, "dump.pgcustom")
+    allowed = {"dump.pgcustom", "manifest.json"}
+    seen = set()
+    size = os.path.getsize(path)
+    with open(path, "rb") as stream:
+        for _ in range(2):
+            header = stream.read(512)
+            try:
+                member = tarfile.TarInfo.frombuf(header, "utf-8", "strict")
+            except (tarfile.HeaderError, UnicodeError):
+                raise SnapshotError("invalid snapshot bundle header") from None
+            if (member.name not in allowed - seen or
+                    member.type not in (tarfile.REGTYPE, tarfile.AREGTYPE) or
+                    not 0 < member.size <= size - stream.tell() or
+                    (member.name == "manifest.json" and member.size > MANIFEST_LIMIT)):
+                raise SnapshotError("invalid snapshot bundle members")
+            seen.add(member.name)
+            if member.name == "manifest.json":
+                manifest = json.loads(stream.read(member.size))
+            else:
+                with open(dump, "wb") as output:
+                    remaining = member.size
+                    while remaining:
+                        chunk = stream.read(min(remaining, 1024**2))
+                        if not chunk:
+                            raise SnapshotError("truncated snapshot bundle")
+                        output.write(chunk)
+                        remaining -= len(chunk)
+            padding = (-member.size) % 512
+            if stream.read(padding) != b"\0" * padding:
+                raise SnapshotError("invalid snapshot bundle padding")
+        # A third member, extended header or non-zero trailing data is forbidden.
+        trailer = stream.read(1024)
+        if trailer != b"\0" * 1024:
+            raise SnapshotError("invalid snapshot bundle trailer")
+        for chunk in iter(lambda: stream.read(1024**2), b""):
+            if chunk.strip(b"\0"):
+                raise SnapshotError("invalid snapshot bundle trailer")
     if (manifest.get("version") != 1 or manifest.get("database") != source.name or
             manifest.get("head_table") != source.head_table or
             manifest.get("head_columns") != list(source.head_columns) or
@@ -275,9 +304,10 @@ def restore_container(image):
                  "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-e", "POSTGRES_DB=restore",
                  "-e", "PGDATA=/var/lib/postgresql/drill", image], timeout=60)
         target = Source("paperclip", "restore", "public.placeholder", ("id",), image, name)
-        # pg_isready has native bounded retry through the startup helper, not a host scheduler.
+        # The image's initialization server is socket-only. Container-local TCP
+        # distinguishes final startup without adding any external network route.
         execute(["docker", "exec", name, "sh", "-c",
-                 "i=0; until pg_isready -U postgres -d restore >/dev/null 2>&1; do "
+                 "i=0; until pg_isready -h 127.0.0.1 -U postgres -d restore >/dev/null 2>&1; do "
                  "i=$((i+1)); [ $i -lt 60 ] || exit 1; sleep 1; done"], timeout=75)
         yield target
     finally:
@@ -294,7 +324,7 @@ def restore_and_compare(source, dump, manifest):
         with open(dump, "rb") as stream:
             try:
                 proc = subprocess.run(command(target, "pg_restore", "--exit-on-error",
-                                              "--no-owner", "--no-acl"), stdin=stream,
+                                              "--no-owner", "--no-acl", "--no-tablespaces"), stdin=stream,
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                       timeout=TIMEOUT, env=child_env(), check=False)
             except (OSError, subprocess.TimeoutExpired):
@@ -342,10 +372,25 @@ def drill(cfg, rc, now):
         # filesystem exceptions may contain data, URLs or protected paths.
         receipt["error"] = (str(exc) if isinstance(exc, SnapshotError) else
                             "restore drill failed; inspect protected operator diagnostics")
+    data = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
+    publish = True
+    try:
+        # The shared CLI lock excludes backup retention/uploads. Admit the exact
+        # replacement delta, including status objects, also for standalone drills.
+        objects = [obj for prefix in ("db/", "instance/", *PREFIXES, "status/")
+                   for obj in rc.list(prefix)]
+        previous = sum(obj.size for obj in objects if obj.key == "status/restore-last.json")
+        if sum(obj.size for obj in objects) + len(data) - previous > cfg.cap_bytes:
+            raise SnapshotError("restore receipt would exceed aggregate storage cap")
+    except Exception:
+        receipt["ok"] = False
+        receipt["error"] = "restore receipt storage admission failed; local evidence retained"
+        data = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
+        publish = False
     os.makedirs(cfg.receipt_dir, mode=0o700, exist_ok=True)
     local = os.path.join(cfg.receipt_dir, f"restore-{now:%Y%m%d-%H%M%S}.json")
-    data = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
     with open(local, "xb") as stream:
         stream.write(data)
-    rc.put_bytes(data, "status/restore-last.json")
+    if publish:
+        rc.put_bytes(data, "status/restore-last.json")
     return 0 if receipt["ok"] else 1

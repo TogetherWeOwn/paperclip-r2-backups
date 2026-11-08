@@ -101,7 +101,10 @@ Both the exact per-table counts/schema-head query and `pg_dump --snapshot` impor
 that snapshot while the owning connection stays open. Later committed writes are
 not included in either answer. Avoid migration/DDL windows during capture: PostgreSQL
 snapshot semantics are not a global migration lock. Failure aborts the run before
-retention, and no completed bundle is published until capture finishes.
+retention, and no completed bundle is published until capture finishes. Same-day
+retries recapture and reverify new database bundles: object presence alone is not
+proof that an earlier upload passed verification. This may create several same-day
+bundles, still governed by GFS, the newest-three floor and the aggregate cap.
 
 Schema head means the migration ledger rows at capture: default
 `drizzle.__drizzle_migrations(hash,created_at)` for Paperclip and
@@ -117,7 +120,13 @@ after successful uploads and retention. It downloads each newest offsite bundle
 (<26h old) into a fresh private directory, verifies object size and dump SHA-256,
 then streams the dump to a new compatible Postgres container. It compares the entire
 count map and schema head with the original manifest, never with today's mutable
-source. No source connection is used by `--restore-drill`.
+source. Inventory keys use PostgreSQL's quoted qualified identifiers, including
+application schemas beginning `pg` (only the reserved literal `pg_` prefix is excluded).
+Source tablespaces are intentionally remapped to the target's default tmpfs tablespace
+using `pg_restore --no-tablespaces`; the drill verifies data, not source storage paths.
+Only two plain regular archive members are parsed; extended headers are rejected
+before expansion and trailer/padding/manifest sizes are validated. No source connection
+is used by `--restore-drill`.
 
 Targets have no network, published ports, host bind mounts, Docker socket or
 credentials. The root is read-only; data is bounded tmpfs, memory/swap/CPU/PIDs are
@@ -190,8 +199,11 @@ restored sequentially, never with overlapping target memory allocations.
   **both** `status/last-run.json` and `status/restore-last.json`, plus systemd Result.
 - Each drill writes a timestamped private local JSON receipt under
   `~/.local/state/paperclip-r2-backup/receipts/` (override `RESTORE_RECEIPT_DIR`),
-  then replaces `status/restore-last.json` offsite. Receipt-upload failure fails
-  the invocation; its local receipt remains. Receipts contain metadata/counts, not
+  then admits its exact replacement-byte delta against the aggregate bucket cap
+  before replacing `status/restore-last.json` offsite. If admission fails, retain
+  local failure evidence without publishing; the previous offsite receipt is not
+  current-run success. Receipt-upload failure also fails the invocation; its local
+  receipt remains. Receipts contain metadata/counts, not
   row content, connection strings or master keys. Treat counts/schema names as
   protected operational metadata. Local history is Operator-managed evidence;
   include it in existing evidence archival/retention rather than a new scheduler.

@@ -21,6 +21,7 @@ jobs:
       full-run-globs-json: '[".github/**","**/package.json","package.json","**/package-lock.json","package-lock.json","**/tsconfig*.json","tsconfig*.json"]'
   security:
     permissions:
+      actions: read
       contents: read
       security-events: write
     uses: TogetherWeOwn/.github/.github/workflows/public-pr-security.yml@20d95fd8c249c7192c364f8b41519fca3fc873df

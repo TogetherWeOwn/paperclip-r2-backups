@@ -18,7 +18,7 @@ merging this source.
 | Writes | Private temporary bundles, bounded throwaway restore containers, local receipts, private R2 managed prefixes only |
 | R2 deletion boundary | `db/`, `instance/`, `paperclip/`, `hindsight/`; exact bundle names only in the new database prefixes; `status/` is never deleted |
 | Retention | Existing database GFS 30 daily / 12 weekly / 12 monthly independently for native and supplemental databases; original instance windows unchanged; newest three and aggregate four-delete budget retained |
-| Capacity | Existing aggregate bucket cap, including new prefixes and status objects; no cap increase or new paid service; fail rather than authorize spend |
+| Capacity | Existing aggregate bucket cap, including new prefixes and status objects; admit restore-receipt replacement delta separately; retain local failure if publication cannot fit; no cap increase or new paid service |
 | Isolation | `--network=none`, no published ports, no bind mount or socket in target, digest-pinned pre-pulled image, unprivileged container user, read-only root, bounded memory/data tmpfs/CPU/PIDs, no swap |
 | Lifetime | Each database operation bounded to one hour; unit total bounded to six hours; SIGTERM cleanup allowance two minutes; sequential targets are deleted before the next target starts |
 | Authentication | Existing source local socket or libpq service/pass file; bucket-scoped rclone environment; no password/URL in argv or logs; no new credential |

@@ -33,6 +33,21 @@ def run():
                 s.sql(source, "CREATE EXTENSION vector;\n"
                               "CREATE TABLE embeddings(id integer, embedding vector(3));\n"
                               "INSERT INTO embeddings VALUES (1, '[1,2,3]');\n")
+            s.execute(["docker", "exec", source.container, "mkdir", "/tmp/fixture-tablespace"])
+            s.sql(source, """
+CREATE TABLESPACE fixture_space LOCATION '/tmp/fixture-tablespace';
+CREATE TABLE placed(id integer) TABLESPACE fixture_space;
+INSERT INTO placed VALUES (1);
+CREATE SCHEMA pgmq;
+CREATE TABLE pgmq.queue(id integer);
+INSERT INTO pgmq.queue VALUES (1);
+CREATE SCHEMA a;
+CREATE SCHEMA "a.b";
+CREATE TABLE a."b.c"(id integer);
+CREATE TABLE "a.b".c(id integer);
+INSERT INTO a."b.c" VALUES (1);
+INSERT INTO "a.b".c VALUES (1), (2);
+""")
             sources.append(source)
 
         # Filesystem object-store fixture deliberately holds independent bytes;
@@ -109,6 +124,10 @@ def run():
         for database in receipt["databases"].values():
             assert database["counts"]["public.items"] == 7
             assert database["cleanup_ok"]
+            assert database["counts"]["pgmq.queue"] == 1
+            assert database["counts"]['a."b.c"'] == 1
+            assert database["counts"]['"a.b".c'] == 2
+            assert database["counts"]["public.placed"] == 1
         assert receipt["databases"]["hindsight"]["counts"]["public.embeddings"] == 1
         os.makedirs("artifacts", exist_ok=True)
         with open("artifacts/restore-fixture-receipt.json", "w") as stream:
