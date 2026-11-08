@@ -10,6 +10,7 @@ conf_dir="$HOME/.config/paperclip-r2-backup"
 install -d -m 0755 "$bin_dir" "$unit_dir"
 install -d -m 0700 "$conf_dir"
 install -m 0755 "$here/paperclip_r2_backup.py" "$bin_dir/paperclip_r2_backup.py"
+install -m 0644 "$here/database_snapshots.py" "$bin_dir/database_snapshots.py"
 install -m 0644 "$here/systemd/paperclip-r2-backup.service" "$unit_dir/"
 install -m 0644 "$here/systemd/paperclip-r2-backup.timer" "$unit_dir/"
 

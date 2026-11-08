@@ -3,7 +3,8 @@
 Offsite backups of a self-hosted [Paperclip](https://github.com/paperclipai/paperclip) instance to Cloudflare R2, and a small web console to browse and manage the bucket.
 
 - **`backup/`**: a Python script (stdlib plus `rclone`), run once a day by a systemd user timer.
-  - Each run uploads the newest complete native Paperclip database dump and a snapshot of the instance's non-secret files.
+  - Each run preserves the native Paperclip dump and instance snapshot uploads. With `SNAPSHOT_BACKUPS=true`, it also captures snapshot-bound `pg_dump -Fc` bundles for Paperclip and Hindsight, each with its own <26-hour offsite freshness check.
+  - On Sunday UTC, the existing daily invocation downloads both offsite bundles, restores them in isolated throwaway compatible containers and compares schema heads/exact table counts with the original source snapshot. Receipts include timestamps, dump/object SHA-256, schema heads, counts, image pins and cleanup results.
   - It then applies grandfather-father-son retention: 30 daily, 12 weekly and 12 monthly for database dumps, and 7 daily, 4 weekly and 3 monthly for instance snapshots.
   - Safety rails: nothing is deleted after a failed upload or when the backups are stale, the newest 3 are always kept, deletions per run are capped, a prefix guard limits which keys can be touched, and `--dry-run` shows the plan. Cap and spend guards are also built in.
 - **`worker/`**: a Cloudflare Worker built on [R2-Explorer](https://github.com/G4brym/R2-Explorer).
@@ -18,6 +19,13 @@ Recommended bucket settings:
 - add an R2 bucket lock on `db/` that is a little shorter than the daily window, for example 28 days, so recent dumps cannot be deleted even with valid credentials.
 
 ## Install (backup)
+
+Operator-only after merge and applicable production approval. Follow
+[the installation/rollback and live acceptance checklist](docs/restore.md#installupgrade-operator-only-after-merged-source-and-production-acceptance)
+and [the offsite-backup host-exception entry](docs/host-exceptions.md).
+Existing credentials and digest-pinned compatible restore images are prerequisites.
+The original bucket cap is unchanged and now includes both new database prefixes.
+
 ```sh
 bash backup/install.sh          # installs script + user units, enables (not starts) the timer
 $EDITOR ~/.config/paperclip-r2-backup/env   # from backup/env.example
@@ -29,9 +37,12 @@ systemctl --user start paperclip-r2-backup.timer
 See `worker/README.md`.
 
 ## Tests
-```sh
-cd backup && python3 -m unittest -v
-```
+
+GitHub Actions is the CI of record. The Backup CI workflow runs Python unit/negative
+coverage and real PostgreSQL/pgvector restore fixtures; it retains a fixture receipt
+artifact for the tested head. Full suites/integration restores are not run on the
+shared host. Only a focused reproduction of an individual failing test is local
+diagnostic work. CI fixtures are not evidence of a successful live installation.
 
 ## License
 MIT

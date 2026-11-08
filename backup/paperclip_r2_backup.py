@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import datetime as dt
 import gzip
+import fcntl
+import signal
 import json
 import os
 import re
@@ -22,6 +24,8 @@ import tarfile
 import tempfile
 from dataclasses import dataclass, field
 
+import database_snapshots as snapshots
+
 REMOTE = "R2"
 DB_PREFIX = "db/"
 INSTANCE_PREFIX = "instance/"
@@ -29,8 +33,8 @@ STATUS_PREFIX = "status/"
 STATUS_KEY = "status/last-run.json"
 # Only these prefixes may ever be deleted from. Everything else in the bucket
 # (for example legacy data/ and ops/) is off limits.
-DELETABLE_PREFIXES = (DB_PREFIX, INSTANCE_PREFIX)
-MANAGED_PREFIXES = (DB_PREFIX, INSTANCE_PREFIX, STATUS_PREFIX)
+DELETABLE_PREFIXES = (DB_PREFIX, INSTANCE_PREFIX, *snapshots.PREFIXES)
+MANAGED_PREFIXES = (*DELETABLE_PREFIXES, STATUS_PREFIX)
 
 DB_NAME_RE = re.compile(r"^paperclip-\d{8}-\d{6}\.sql\.gz$")
 TS_RE = re.compile(r"(\d{8})-(\d{6})")
@@ -97,6 +101,9 @@ class Config:
     max_deletes: int = DEFAULT_MAX_DELETES
     tmp_dir: str = ""
     rclone_bin: str = "rclone"
+    sources: tuple[snapshots.Source, ...] = ()
+    receipt_dir: str = ""
+    restore_weekday: int = 6  # Sunday UTC, inside the existing daily timer
 
     def retention_for(self, prefix: str) -> tuple[int, int, int]:
         if prefix == INSTANCE_PREFIX:
@@ -118,6 +125,9 @@ def load_config(env: dict | None = None) -> Config:
     rd = _int(env, "RETAIN_DAILY", 30)
     rw = _int(env, "RETAIN_WEEKLY", 12)
     rm = _int(env, "RETAIN_MONTHLY", 12)
+    weekday = _int(env, "RESTORE_WEEKDAY", 6)
+    if weekday > 6:
+        raise BackupError("RESTORE_WEEKDAY must be 0 (Monday) through 6 (Sunday)")
     return Config(
         bucket=bucket,
         backup_dir=os.path.expanduser(backup_dir),
@@ -132,6 +142,10 @@ def load_config(env: dict | None = None) -> Config:
         tmp_dir=os.path.expanduser(env.get("BACKUP_TMP_DIR") or
                                    os.path.join(home, ".cache/paperclip-r2-backup")),
         rclone_bin=env.get("RCLONE_BIN", "rclone"),
+        sources=snapshots.load_sources(env) if _bool(env.get("SNAPSHOT_BACKUPS")) else (),
+        restore_weekday=weekday,
+        receipt_dir=os.path.expanduser(env.get("RESTORE_RECEIPT_DIR") or
+                                      os.path.join(home, ".local/state/paperclip-r2-backup/receipts")),
     )
 
 
@@ -161,12 +175,14 @@ class Rclone:
     def _run(self, args: list[str], stdin: bytes | None = None) -> str:
         try:
             proc = subprocess.run([self.binary, *args], input=stdin,
-                                  capture_output=True, check=False)
+                                  capture_output=True, check=False, timeout=3600)
+        except subprocess.TimeoutExpired:
+            raise BackupError("rclone operation timed out") from None
         except OSError as exc:
             raise BackupError(f"cannot run rclone: {exc.strerror}")
         if proc.returncode != 0:
-            err = proc.stderr.decode("utf-8", "replace").strip()[-300:]
-            raise BackupError(f"rclone {args[0]} failed (rc={proc.returncode}): {err}")
+            # Backend errors can echo credentials or signed URLs. Never log stderr.
+            raise BackupError(f"rclone {args[0]} failed (rc={proc.returncode})")
         return proc.stdout.decode("utf-8", "replace")
 
     def list(self, prefix: str) -> list[Obj]:
@@ -198,6 +214,11 @@ class Rclone:
         dst_dir = key.rsplit("/", 1)[0]
         self._run(["check", "--one-way", "--include", "/" + name,
                    src_dir, self._target(dst_dir)])
+
+    def download(self, key: str, local: str, max_bytes: int) -> None:
+        assert_managed(key, snapshots.PREFIXES)
+        self._run(["copyto", "--max-transfer", str(max_bytes), "--cutoff-mode", "hard",
+                   "--retries", "1", self._target(key), local])
 
     def delete(self, key: str) -> None:
         assert_managed(key, DELETABLE_PREFIXES)
@@ -274,6 +295,8 @@ def plan_retention(objs: list[Obj], now: dt.datetime, retention: tuple[int, int,
     for o in objs:
         if not o.key.startswith(prefix):
             raise BackupError("object outside prefix passed to retention")
+        if prefix in snapshots.PREFIXES and not snapshots.BUNDLE.fullmatch(o.key):
+            continue
         ts = key_timestamp(o.key)
         if ts is not None:  # unparseable keys are never touched
             items.append((o.key, ts))
@@ -507,6 +530,25 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         else:
             planned.append((dump, dump_key))
 
+        # Snapshot-bound supplemental DB bundles. Native Paperclip SQL is unchanged.
+        for source in cfg.sources:
+            source_objects = [o for o in existing[source.prefix] if snapshots.BUNDLE.fullmatch(o.key)]
+            prior = newest_ts(source_objects)
+            if prior and (prior - now).total_seconds() > FUTURE_SKEW_SECONDS:
+                raise BackupError(source.name + ": offsite snapshot dated in the future")
+            if prior and (now - prior).total_seconds() > MAX_FORWARD_JUMP_SECONDS:
+                retention_block = "retention skipped: snapshot clock jump or extended backup gap"
+            if day_has_object(source_objects, today):
+                continue
+            if dry_run:
+                # New dumps cannot be sized without reading the source. No DB access
+                # in dry-run; the real run sizes all bundles before its cap decision.
+                log(source.name + ": would capture snapshot (size unknown until capture)")
+            else:
+                if tmp_root is None:
+                    tmp_root = tempfile.mkdtemp(prefix="build-", dir=_ensure_dir(cfg.tmp_dir))
+                planned.append(snapshots.capture(source, now, tmp_root))
+
         # b) instance snapshot, once per UTC day
         want_instance = not day_has_object(existing[INSTANCE_PREFIX], today)
         if not want_instance:
@@ -527,7 +569,8 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                     est))
         else:
             if want_instance:
-                tmp_root = tempfile.mkdtemp(prefix="build-", dir=_ensure_dir(cfg.tmp_dir))
+                if tmp_root is None:
+                    tmp_root = tempfile.mkdtemp(prefix="build-", dir=_ensure_dir(cfg.tmp_dir))
                 tar_path = build_instance_tar(cfg, now, tmp_root)
                 tar_key = f"{INSTANCE_PREFIX}{now:%Y/%m/%d}/{os.path.basename(tar_path)}"
                 planned.append((tar_path, tar_key))
@@ -580,6 +623,16 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         if newest_db is None or (now - newest_db).total_seconds() > FRESH_DUMP_SECONDS:
             raise BackupError("newest offsite database backup is older than 26h")
 
+        status["snapshot_freshness"] = {}
+        if not dry_run:
+            for source in cfg.sources:
+                stamp = newest_ts([o for o in existing[source.prefix]
+                                   if snapshots.BUNDLE.fullmatch(o.key)])
+                fresh = stamp is not None and 0 <= (now - stamp).total_seconds() < FRESH_DUMP_SECONDS
+                status["snapshot_freshness"][source.name] = fresh
+                if not fresh:
+                    raise BackupError(source.name + ": newest offsite dump is not fresh (<26h)")
+
         # d) retention (only reached after every upload was verified)
         if retention_block:
             raise BackupError(retention_block)
@@ -622,16 +675,37 @@ def _ensure_dir(path: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     dry_run = "--dry-run" in argv
-    if any(a not in ("--dry-run",) for a in argv):
-        print("usage: paperclip_r2_backup.py [--dry-run]", file=sys.stderr)
+    if any(a not in ("--dry-run", "--restore-drill") for a in argv) or len(argv) > 1:
+        print("usage: paperclip_r2_backup.py [--dry-run | --restore-drill]", file=sys.stderr)
         return EXIT_ERROR
+    os.umask(0o077)
+
+    def interrupted(signum, frame):
+        raise snapshots.SnapshotError("operation interrupted")
+
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
     try:
         cfg = load_config()
-    except BackupError as exc:
+        rc = Rclone(cfg.bucket, cfg.rclone_bin)
+        now = dt.datetime.now(dt.timezone.utc)
+        if dry_run:
+            return run(cfg, rc, now, True)
+        # Shared lock protects retention/download and prevents overlapping source dumps.
+        with open(os.path.join(_ensure_dir(cfg.tmp_dir), "operation.lock"), "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise BackupError("another backup/restore drill is running") from None
+            if "--restore-drill" in argv:
+                return snapshots.drill(cfg, rc, now)
+            code = run(cfg, rc, now)
+            if code == EXIT_OK and cfg.sources and now.weekday() == cfg.restore_weekday:
+                return snapshots.drill(cfg, rc, dt.datetime.now(dt.timezone.utc))
+            return code
+    except (BackupError, snapshots.SnapshotError) as exc:
         log(f"error: {exc}")
         return EXIT_ERROR
-    rc = Rclone(cfg.bucket, cfg.rclone_bin)
-    return run(cfg, rc, dt.datetime.now(dt.timezone.utc), dry_run)
 
 
 if __name__ == "__main__":
