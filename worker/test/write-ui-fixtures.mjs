@@ -69,11 +69,23 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     await writeFile(new URL(`${step}.png`, artifacts), Buffer.from(data, "base64"));
   };
   const menu = async (name, action) => {
-    await evaluate(`const row = rows().find(row => filename(row) === values[0]);
+    const point = await evaluate(`await wait(() => !document.querySelector('.q-menu'), 'Previous file menu closed');
+      const row = rows().find(row => filename(row) === values[0]);
       if (!row) throw new Error('Missing source row');
       const button = row.querySelector('button'); if (!button) throw new Error('Missing row menu'); button.click();
-      await wait(() => document.querySelector('.q-menu .q-item'), 'File menu');
-      click('.q-menu .q-item', values[1]);`, [name, action]);
+      await wait(() => {
+        const item = control('.q-menu .q-item', values[1]);
+        if (!item) return false;
+        const rect = item.getBoundingClientRect();
+        return item.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+      }, 'File menu control');
+      const rect = control('.q-menu .q-item', values[1]).getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };`, [name, action]);
+    await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+    await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
+    await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
+    (record.fileMenuClicks ??= []).push({ name, action, ...point });
+    await evaluate("await wait(() => !document.querySelector('.q-menu'), 'Selected file menu closed');");
   };
   const newMenu = async (action) => {
     const point = await evaluate(`await wait(() => control('button', 'New'), 'New button');
