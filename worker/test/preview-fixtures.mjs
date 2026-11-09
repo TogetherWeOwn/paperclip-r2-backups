@@ -250,15 +250,41 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
             await wait(() => canvases().every(canvas => ink(canvas) > 100), 'PDF resize glyph painting');
             return canvases().map(canvas => ({width:canvas.width, height:canvas.height, ink:ink(canvas)}));
           `);
+          const resizeLayout = () => evaluate(`
+            const box = element => {
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return {tag:element.tagName, id:element.id, class:element.className,
+                width:rect.width, height:rect.height, clientWidth:element.clientWidth,
+                scrollWidth:element.scrollWidth, minWidth:style.minWidth, overflow:style.overflow};
+            };
+            const components = ${pdfComponentsExpression};
+            return {width:innerWidth, height:innerHeight, documentWidth:document.documentElement.clientWidth,
+              dialog:[...document.querySelectorAll('.q-dialog__inner, .q-dialog .q-card, .q-dialog .q-card__section.scroll, #pdfvuer')].map(box),
+              pages:components.map(component => ({scale:component.scale, resize:component.resize,
+                container:box(component.$refs.container), viewport:{width:component.pdfViewer.viewport.width, height:component.pdfViewer.viewport.height},
+                sensors:component.$.subTree.children[1].children.filter(node => node.component)
+                  .map(node => ({size:node.component.proxy.size, box:box(node.component.proxy.$el),
+                    scroll:[...node.component.proxy.$el.children].map(element => ({left:element.scrollLeft, top:element.scrollTop, width:element.scrollWidth, height:element.scrollHeight}))}))})),
+              canvases:[...document.querySelectorAll('#pdfvuer canvas')].map(canvas => ({width:canvas.width, height:canvas.height}))};
+          `);
+          record.resizeLayout = {initial:await resizeLayout()};
           try {
             await cdp.call("Emulation.setDeviceMetricsOverride", { width: 900, height: 700, deviceScaleFactor: 1, mobile: false });
-            record.narrow = await measureResize(record.actual.pages[0].width);
-            const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
-            await writeFile(new URL(`${id}-narrow.png`, artifacts), Buffer.from(screenshot.data, "base64"));
+            try {
+              record.narrow = await measureResize(record.actual.pages[0].width);
+            } finally {
+              // Retain the actual narrow layout even when the dimension assertion
+              // fails; restoring first hides viewport/container/sensor mismatches.
+              record.resizeLayout.narrow = await resizeLayout();
+              const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
+              await writeFile(new URL(`${id}-narrow.png`, artifacts), Buffer.from(screenshot.data, "base64"));
+            }
           } finally {
             await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
           }
           record.restored = await measureResize(record.narrow[0].width);
+          record.resizeLayout.restored = await resizeLayout();
           assert.deepEqual(record.restored.map(page => [page.width, page.height]), record.actual.pages.map(page => [page.width, page.height]));
           assert.deepEqual(evidence.network.slice(networkStart).filter(response => response.type === "Worker" || /\.worker[.-]/i.test(response.url)), [], "No separately fetched real or remote PDF worker");
         } else {
