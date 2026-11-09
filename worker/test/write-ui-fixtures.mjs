@@ -402,7 +402,8 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     await evaluate("await wait(() => document.body.innerText.includes('File Updated!'), 'Completed metadata notification');");
     const updated = state.objects.get(folder + original);
     assert.deepEqual(Buffer.from(updated.bytes), Buffer.from(body), "Metadata editing must preserve exact downloaded Unicode bytes");
-    assert.deepEqual(updated.customMetadata, { ...metadata, read: "true" });
+    const expectedMetadata = Object.assign(Object.create(null), metadata, { read: "true" });
+    assert.deepEqual(updated.customMetadata, expectedMetadata);
     assert.deepEqual(updated.httpMetadata, { contentType: "text/plain" });
     assert.deepEqual(mutations(), [...beforeMetadata, ["put", folder + original]]);
     const metadataCalls = state.calls.slice(metadataCallStart).filter(([operation]) => ["get", "put", "delete"].includes(operation));
@@ -411,7 +412,7 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     const metadataResponse = evidence.network.slice(metadataRequestStart).find(({ url }) => url === metadataUrl);
     assert.equal(metadataResponse?.status, 200);
     const metadataHead = await state.bucket.head(folder + original);
-    assert.deepEqual(metadataHead.customMetadata, { ...metadata, read: "true" });
+    assert.deepEqual(metadataHead.customMetadata, expectedMetadata);
     assert.deepEqual(metadataHead.httpMetadata, { contentType: "text/plain" });
     assert.equal(metadataHead.size, Buffer.byteLength(body));
     record.metadata = { status: "pass", customMetadata: metadataHead.customMetadata,
