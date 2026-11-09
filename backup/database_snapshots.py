@@ -522,8 +522,8 @@ def drill(cfg, rc, now):
         data = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
         publish = False
     os.makedirs(cfg.receipt_dir, mode=0o700, exist_ok=True)
-    local = os.path.join(cfg.receipt_dir, f"restore-{now:%Y%m%d-%H%M%S}.json")
-    with open(local, "xb") as stream:
+    with tempfile.NamedTemporaryFile(mode="wb", prefix=f"restore-{now:%Y%m%d-%H%M%S}-",
+                                     suffix=".json", dir=cfg.receipt_dir, delete=False) as stream:
         stream.write(data)
     if publish:
         rc.put_bytes(data, "status/restore-last.json")
