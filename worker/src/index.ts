@@ -99,7 +99,7 @@ async function verifyAccessJwt(token: string, team: string, aud: string): Promis
 const deny = (status: number, msg: string) =>
   new Response(msg, { status, headers: { "cache-control": "no-store", "content-type": "text/plain" } });
 
-const JSON_WRITE_ROUTES = ["move", "copy", "folder", "delete", "multipart/complete"];
+const RAW_WRITE_ROUTES = ["upload", "multipart/create", "multipart/upload"];
 
 /**
  * CSRF defence for state-changing requests. A valid Access JWT is attached by Access
@@ -117,7 +117,7 @@ function csrfError(req: Request, url: URL): string | null {
     return "write request without a same-origin Origin blocked";
   }
   const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/)?.[1];
-  const jsonRoute = rest !== undefined && (JSON_WRITE_ROUTES.includes(rest) || (!rest.includes("/") && rest !== "upload"));
+  const jsonRoute = rest !== undefined && !RAW_WRITE_ROUTES.includes(rest);
   if (jsonRoute && (req.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase() !== "application/json") {
     return "JSON content type required";
   }

@@ -100,6 +100,9 @@ test("CSRF fetch-site, Origin and control media checks reject before body", asyn
     { "content-type": "application/json-unrecognized" },
     { "content-type": "multipart/form-data" },
   ]) assert.equal((await state.send(unread(`${base}/delete`, headers))).status, 403);
+  for (const key of ["db/???.txt", "db/???"]) {
+    assert.equal((await state.send(unread(`${base}/${encode(key)}`, { "content-type": "text/plain" }))).status, 403);
+  }
   assert.deepEqual(state.calls, []);
 });
 

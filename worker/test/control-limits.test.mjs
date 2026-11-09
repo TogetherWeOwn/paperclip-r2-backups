@@ -216,6 +216,9 @@ test("decoded key and encoded/decoded metadata boundaries precede parse", () => 
     if (bytes <= 1024) assert.equal(decodeKey(b64("x".repeat(bytes))).length, bytes);
     else invalid(() => decodeKey(b64("x".repeat(bytes))));
   }
+  const bomKey = String.fromCodePoint(0xfeff) + "db/source";
+  assert.equal(decodeKey(b64(bomKey)), bomKey);
+  assert.equal(decodeKey(b64(String.fromCodePoint(0xfeff))), String.fromCodePoint(0xfeff));
   invalid(() => decodeKey(b64("é".repeat(513))));
   invalid(() => decodeKey("%bad"));
   invalid(() => decodeKey("/w=="));

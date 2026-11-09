@@ -95,6 +95,18 @@ function listOptions(query: URLSearchParams): R2ListOptions {
   };
 }
 
+function objectHeaders(object: R2Object, key: string): Headers {
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  headers.set("content-length", String(object.size));
+  const filename = key.split("/").pop() || "download";
+  const ascii = filename.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "'");
+  const utf8 = encodeURIComponent(filename).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  headers.set("content-disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${utf8}`);
+  return headers;
+}
+
 const POST_ROUTES = ["move", "copy", "folder", "delete", "upload", "multipart/create", "multipart/upload", "multipart/complete"];
 
 /** Closed dispatch: no env enumeration, generic resolver, recursive operation or parser fallback. */
@@ -148,6 +160,7 @@ export async function consoleApi(
         const source = decodeKey(rest === "move" ? body.oldKey : body.sourceKey);
         const destination = decodeKey(rest === "move" ? body.newKey : body.destinationKey);
         writable(rest === "move" ? [source, destination] : [destination], prefixes);
+        if (rest === "move" && source === destination) throw new InputError();
         const object = await env.BACKUPS.get(source);
         if (object === null) return failure(404);
         const result = await env.BACKUPS.put(destination, object.body, {
@@ -176,10 +189,9 @@ export async function consoleApi(
     }
 
     // Named route aliases are never reinterpreted as object keys.
-    if (rest === "share" || rest === "shares" || rest.endsWith("/")) return failure(404);
+    if (rest === "share" || rest === "shares" || rest.endsWith("/share")) return failure(404);
     const headAlias = rest.endsWith("/head");
     const encodedPath = headAlias ? rest.slice(0, -5) : rest;
-    if (encodedPath.includes("/")) return failure(404);
     if (headAlias ? request.method !== "GET" : !["GET", "HEAD", "POST"].includes(request.method)) return failure(405);
     checkQuery(query, []);
     boundedString(encodedPath, LIMITS.encodedKeyBytes);
@@ -189,12 +201,14 @@ export async function consoleApi(
     } catch {
       throw new InputError();
     }
+    // The pinned client interpolates ordinary padded base64, including internal/terminal '/'.
+    // Validate the entire encoding, not URL segment count; named/nested aliases still fail closed.
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) return failure(404);
     const key = decodeKey(encoded);
     if (headAlias || request.method === "HEAD") {
       const object = await env.BACKUPS.head(key);
       if (object === null) return failure(404);
-      const response = json(object);
-      return request.method === "HEAD" ? new Response(null, { headers: response.headers }) : response;
+      return headAlias ? json(object) : new Response(null, { headers: objectHeaders(object, key) });
     }
     if (request.method === "POST") {
       const body = await readControlJson(request, controlLimits);
@@ -208,15 +222,7 @@ export async function consoleApi(
     }
     const object = await env.BACKUPS.get(key);
     if (object === null) return failure(404);
-    const headers = new Headers();
-    object.writeHttpMetadata(headers);
-    headers.set("etag", object.httpEtag);
-    headers.set("content-length", String(object.size));
-    const filename = key.split("/").pop() || "download";
-    const ascii = filename.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "'");
-    const utf8 = encodeURIComponent(filename).replace(/['()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
-    headers.set("content-disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${utf8}`);
-    return new Response(object.body, { headers });
+    return new Response(object.body, { headers: objectHeaders(object, key) });
   } catch (error) {
     if (error instanceof InputError) return failure(error.status);
     // One constant safe log at most; no platform exception detail or request values.

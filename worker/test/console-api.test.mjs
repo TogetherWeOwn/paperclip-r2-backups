@@ -71,6 +71,44 @@ test("move checks both write targets; copy checks only its destination and prese
   await rejected(fixture(), post(`${base}/copy`, { sourceKey: encode("db/source"), destinationKey: encode("outside/dest") }), 403);
 });
 
+test("unchanged rename rejects without reading, rewriting or deleting the original", async () => {
+  const state = fixture();
+  seed(state);
+  const original = state.objects.get("db/source");
+  await rejected(state, post(`${base}/move`, { oldKey: encode("db/source"), newKey: encode("db/source") }));
+  assert.equal(state.objects.get("db/source"), original);
+});
+
+test("raw and escaped base64 slash paths preserve key identity for object operations", async () => {
+  for (const key of ["db/???.txt", "db/???", "db/??????"]) {
+    assert.ok(encode(key).includes("/"));
+    for (const path of [encode(key), keyPath(key)]) {
+      const state = fixture();
+      seed(state, key);
+      assert.equal(await (await state.send(request(`${base}/${path}`))).text(), "streamed data");
+      assert.equal((await (await state.send(request(`${base}/${path}/head`))).json()).key, key);
+      assert.equal((await state.send(request(`${base}/${path}`, { method: "HEAD" }))).status, 200);
+      assert.equal((await state.send(post(`${base}/${path}`, { customMetadata: { edited: true }, httpMetadata: {} }))).status, 200);
+      assert.ok(state.calls.every(([, target]) => target === key));
+    }
+  }
+});
+
+test("leading BOM remains part of key identity for reads, writes and prefix checks", async () => {
+  const state = fixture();
+  seed(state);
+  const key = String.fromCodePoint(0xfeff) + "db/source";
+  state.objects.set(key, { bytes: new TextEncoder().encode("BOM object") });
+  assert.equal(await (await state.send(request(`${base}/${keyPath(key)}`))).text(), "BOM object");
+  state.calls.length = 0;
+  await rejected(state, post(`${base}/delete`, { key: encode(key) }), 403);
+  await rejected(state, post(`${base}/${keyPath(key)}`, { customMetadata: {}, httpMetadata: {} }), 403);
+  assert.equal((await state.send(post(`${base}/delete`, { key: encode(key) }), ["*"])).status, 200);
+  assert.deepEqual(state.calls, [["delete", key]]);
+  assert.ok(state.objects.has("db/source"));
+  assert.ok(!state.objects.has(key));
+});
+
 test("folder appends exactly one slash; delete is one object only", async () => {
   for (const key of ["db/folder", "db/folder/"]) {
     const state = fixture();
@@ -125,7 +163,10 @@ test("GET download, HEAD and GET head alias retain metadata and missing semantic
   assert.equal(await download.text(), "streamed data");
   const head = await state.send(request(`${base}/${keyPath(key)}`, { method: "HEAD" }));
   assert.equal(head.status, 200);
+  assert.deepEqual([...head.headers], [...download.headers]);
   assert.equal(await head.text(), "");
+  assert.equal(state.calls.filter(([name]) => name === "get").length, 1);
+  assert.equal(state.calls.filter(([name]) => name === "head").length, 1);
   const alias = await (await state.send(request(`${base}/${keyPath(key)}/head`))).json();
   assert.equal(alias.key, key);
   assert.deepEqual(alias.customMetadata, { owner: "fixture" });

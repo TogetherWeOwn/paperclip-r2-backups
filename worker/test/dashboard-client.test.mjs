@@ -151,12 +151,21 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
         await m.G.copyObject('BACKUPS', 'db/client.txt', 'db/copy.txt');
         await m.G.renameObject('BACKUPS', 'db/copy.txt', 'db/moved.txt');
         const downloaded = await m.G.downloadFile('BACKUPS', 'db/client.txt', {downloadType: 'blob'});
+        const slashKeys = [];
+        for (const key of ['db/???.txt', 'db/???', 'db/??????']) {
+          await m.G.uploadObjects(file, key, 'BACKUPS', () => {});
+          const slashHead = await m.G.headFile('BACKUPS', key);
+          await m.a.head('/buckets/BACKUPS/' + m.E(key));
+          const slashEdited = await m.G.updateMetadata('BACKUPS', key, {read: true}, {contentType: 'text/plain'});
+          const slashDownloaded = await m.G.downloadFile('BACKUPS', key, {downloadType: 'blob'});
+          slashKeys.push({key, head: slashHead.key, edited: slashEdited.key, text: new TextDecoder().decode(slashDownloaded.data)});
+        }
         const upload = (await m.G.multipartCreate(file, 'db/parts.txt', 'BACKUPS')).data;
         const part = (await m.G.multipartUpload(upload.uploadId, 1, 'BACKUPS', 'db/parts.txt', file, () => {})).data;
         const complete = (await m.G.multipartComplete(file, 'db/parts.txt', 'BACKUPS', [part], upload.uploadId)).data;
         await m.G.deleteObject('db/moved.txt', 'BACKUPS');
         return {config, listed: listed.objects.length, visible: visible.files.map(f => f.name), head: head.key,
-          edited: edited.key, downloaded: new TextDecoder().decode(downloaded.data), complete};
+          edited: edited.key, downloaded: new TextDecoder().decode(downloaded.data), slashKeys, complete};
       })()`,
       awaitPromise: true, returnByValue: true,
     });
@@ -169,6 +178,7 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     assert.equal(result.head, "db/client.txt");
     assert.equal(result.edited, "db/client.txt");
     assert.equal(result.downloaded, "pinned client bytes");
+    assert.deepEqual(result.slashKeys, ["db/???.txt", "db/???", "db/??????"].map((key) => ({ key, head: key, edited: key, text: "pinned client bytes" })));
     assert.equal(result.complete.success, true);
     assert.equal(result.complete.str.key, "db/parts.txt");
     assert.deepEqual(failures, []);

@@ -23,7 +23,7 @@ async function runtime() {
           }
           const response = await consoleApi(request, env, ['*']);
           // Keep application headers inspectable independently of workerd's HTTP transport.
-          if (request.method === 'GET' && response.headers.has('content-length')) {
+          if (['GET', 'HEAD'].includes(request.method) && response.headers.has('content-length')) {
             response.headers.set('x-fixture-content-length', response.headers.get('content-length'));
           }
           return response;
@@ -59,9 +59,16 @@ test("native R2 primitive dictionary conversions and Date/cacheExpiry match adap
     assert.deepEqual(actual.httpMetadata, baseline.httpMetadata);
     const download = await instance.dispatchFetch(`https://fixture.test${base}/${encode("db/native")}`);
     const text = await download.text();
+    const head = await instance.dispatchFetch(`https://fixture.test${base}/${encode("db/native")}`, { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+    for (const name of ["etag", "content-type", "content-disposition", "expires", "x-fixture-content-length"]) {
+      assert.equal(head.headers.get(name), download.headers.get(name), name);
+    }
     await mkdir(new URL("../artifacts/", import.meta.url), { recursive: true });
     await writeFile(new URL("../artifacts/native-metadata.json", import.meta.url), JSON.stringify({
       baseline, actual, download: { status: download.status, headers: Object.fromEntries(download.headers), text },
+      head: { status: head.status, headers: Object.fromEntries(head.headers) },
     }, null, 2));
     assert.equal(download.status, 200);
     // A streaming Response's manual Content-Length can be dropped at the native transport.
