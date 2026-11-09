@@ -942,6 +942,25 @@ class BucketInventoryTests(unittest.TestCase):
                         operation(key)
                 run.assert_not_called()
 
+    def test_bucket_paths_fail_closed_at_config_and_rclone_boundaries(self):
+        for bucket in ("my-bucket/backups", "my-bucket/", "/my-bucket", ".", "..",
+                       "my-bucket\\backups", "R2:my-bucket", "my bucket", ""):
+            with self.subTest(bucket=bucket), mock.patch.object(b.subprocess, "run") as run:
+                for construct in (lambda: b.load_config({"BACKUP_BUCKET": bucket}),
+                                  lambda: b.Config(bucket, "unused", "unused"),
+                                  lambda: b.Rclone(bucket)):
+                    with self.assertRaises(b.BackupError):
+                        construct()
+                run.assert_not_called()
+        cfg = b.load_config({"BACKUP_BUCKET": "my-bucket"})
+        rc = b.Rclone(cfg.bucket)
+        items = [{"Path": "ops/archive", "Size": 39426312374, "IsDir": False},
+                 {"Path": "backups/db/dump", "Size": 5, "IsDir": False}]
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(rc, "_run", return_value=json.dumps(items)) as run:
+            self.assertEqual(sum(o.size for o in rc.bucket_inventory()), 39426312379)
+        self.assertEqual(run.call_args.args[0][-1], "R2:my-bucket/")
+
     def test_inventory_allows_binary_override_but_rejects_filter(self):
         env = {"BACKUP_BUCKET": "bk", "RCLONE_BIN": "/reviewed/bin/rclone"}
         proc = mock.Mock(returncode=0, stdout=b"[]")
@@ -1102,6 +1121,43 @@ class WholeBucketCapTests(RunFixture):
         with mock.patch.object(b, "build_instance_tar", side_effect=build):
             self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
         self.assertEqual((rc.uploaded, rc.deleted, rc.puts), ([], [], {}))
+
+    def test_cap_recovery_rechecks_time_after_inventory(self):
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        key = b.db_key_for(dump)
+        invoked = b.key_timestamp(key) + dt.timedelta(hours=25, minutes=30)
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        self.cfg.cap_bytes = 1000
+        cases = ((900, 900, b.EXIT_CAP, 4), (2700, 2700, b.EXIT_CAP, 0),
+                 (-1, 2700, b.EXIT_ERROR, 0), (7200, 2700, b.EXIT_ERROR, 0))
+        for wall_seconds, tick_seconds, code, deletes in cases:
+            with self.subTest(wall_seconds=wall_seconds, tick_seconds=tick_seconds):
+                self.clock.return_value = invoked
+                ticks = [0]
+                history = objs_for([invoked - dt.timedelta(days=i) for i in range(2, 11)])
+                instance = f"instance/{invoked:%Y/%m/%d}/paperclip-instance-{invoked:%Y%m%d-%H%M%S}.tar.gz"
+                rc = NativeIntegrityRclone(history + [b.Obj(instance, 10),
+                    b.Obj(self.ARCHIVE_KEY, self.ARCHIVE_BYTES)])
+                rc.upload(dump, key)
+                rc.uploaded.clear()
+                original = rc.bucket_inventory
+                calls = 0
+
+                def inventory():
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        self.clock.return_value = invoked + dt.timedelta(seconds=wall_seconds)
+                        ticks[0] = tick_seconds
+                    return original()
+
+                with mock.patch.object(rc, "bucket_inventory", side_effect=inventory), \
+                        mock.patch.object(b.snapshots.time, "monotonic", side_effect=lambda: ticks[0]):
+                    self.assertEqual(b.run(self.cfg, rc, invoked), code)
+                self.assertEqual(rc.verified, [key])
+                self.assertEqual(rc.uploaded, [])
+                self.assertEqual(len(rc.deleted), deletes)
+                self.assertEqual(rc.store[self.ARCHIVE_KEY], self.ARCHIVE_BYTES)
 
     def test_failed_admission_inventory_prevents_data_upload(self):
         rc = FakeRclone()

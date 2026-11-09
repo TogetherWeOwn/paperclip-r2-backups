@@ -85,6 +85,12 @@ def _int(env: dict, name: str, default: int) -> int:
     return value
 
 
+def validate_bucket(bucket: str) -> None:
+    # A path here would silently inventory only a subtree of the physical bucket.
+    if not isinstance(bucket, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", bucket):
+        raise BackupError("BACKUP_BUCKET must be a bucket name, not a path")
+
+
 @dataclass
 class Config:
     bucket: str
@@ -104,6 +110,9 @@ class Config:
     sources: tuple[snapshots.Source, ...] = ()
     receipt_dir: str = ""
     restore_weekday: int = 6  # Sunday UTC, inside the existing daily timer
+
+    def __post_init__(self):
+        validate_bucket(self.bucket)
 
     def retention_for(self, prefix: str) -> tuple[int, int, int]:
         if prefix == INSTANCE_PREFIX:
@@ -166,6 +175,7 @@ def assert_managed(key: str, prefixes=MANAGED_PREFIXES) -> None:
 
 class Rclone:
     def __init__(self, bucket: str, binary: str = "rclone"):
+        validate_bucket(bucket)
         self.bucket = bucket
         self.binary = binary
 
@@ -677,18 +687,18 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                 planned.append((tar_path, tar_key))
             incoming_objs = [Obj(k, os.path.getsize(p)) for p, k in planned]
 
-        # Capture/upload may take hours. Freshness and retention use observation
-        # time, not the invocation timestamp retained in the run receipt.
+        # Refresh after capture, immediately before admission. The shared CLI
+        # lock does not reserve capacity against independent external writers.
+        bucket_bytes, existing = inventory_state(rc)
+
+        # Capture and inventory may take hours. Freshness and retention use
+        # observation time after both, not the invocation time in the receipt.
         invoked_at = now
         if not dry_run:
             now = snapshots.utc_now()
             if clock_start < invoked_at:
                 raise BackupError("snapshot clock moved backward since invocation")
             snapshots.check_clock(clock_start, start_tick, now, snapshots.time.monotonic())
-
-        # Refresh after capture, immediately before admission. The shared CLI
-        # lock does not reserve capacity against independent external writers.
-        bucket_bytes, existing = inventory_state(rc)
         managed = sum(o.size for objs in existing.values() for o in objs)
         status["managed_bytes"] = managed
         status["bucket_bytes"] = bucket_bytes
