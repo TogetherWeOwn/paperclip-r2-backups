@@ -374,6 +374,51 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
       completedParts: multipartCalls.at(-1)[1], httpMetadata: largeHead.httpMetadata,
       customMetadata: largeHead.customMetadata, exactBody: true };
     await snapshot("multipart-upload");
+
+    const reloaded = cdp.event("Page.loadEventFired");
+    await cdp.call("Page.navigate", { url: `${origin}/BACKUPS/files/${Buffer.from(folder).toString("base64")}` });
+    await reloaded;
+    await names([original, child]);
+    const beforeMetadata = mutations();
+    await menu(original, "Update Metadata");
+    await dialog("Cancel");
+    await closed();
+    retained(original);
+    assert.deepEqual(mutations(), beforeMetadata, "Cancelling metadata must not rewrite the object");
+    await snapshot("metadata-cancel");
+
+    await menu(original, "Update Metadata");
+    await evaluate(`await wait(() => [...document.querySelectorAll('.q-dialog input')].some(input => input.value === 'read'), 'Metadata fields');
+      const key = [...document.querySelectorAll('.q-dialog input')].find(input => input.value === 'read');
+      const input = key.closest('.flex.row').querySelectorAll('input')[1];
+      if (input.value !== 'false') throw new Error('Missing original metadata value');
+      input.focus(); input.select();`);
+    await cdp.call("Input.insertText", { text: "true" });
+    const metadataCallStart = state.calls.length;
+    const metadataRequestStart = evidence.network.length;
+    await dialog("Update Metadata");
+    await closed();
+    await names([original, child]);
+    await evaluate("await wait(() => document.body.innerText.includes('File Updated!'), 'Completed metadata notification');");
+    const updated = state.objects.get(folder + original);
+    assert.deepEqual(Buffer.from(updated.bytes), Buffer.from(body), "Metadata editing must preserve exact downloaded Unicode bytes");
+    assert.deepEqual(updated.customMetadata, { ...metadata, read: "true" });
+    assert.deepEqual(updated.httpMetadata, { contentType: "text/plain" });
+    assert.deepEqual(mutations(), [...beforeMetadata, ["put", folder + original]]);
+    const metadataCalls = state.calls.slice(metadataCallStart).filter(([operation]) => ["get", "put", "delete"].includes(operation));
+    assert.deepEqual(metadataCalls.map(([operation, key]) => [operation, key]), [["get", folder + original], ["put", folder + original]]);
+    const metadataUrl = `${origin}/api/buckets/BACKUPS/${Buffer.from(folder + original).toString("base64")}`;
+    const metadataResponse = evidence.network.slice(metadataRequestStart).find(({ url }) => url === metadataUrl);
+    assert.equal(metadataResponse?.status, 200);
+    const metadataHead = await state.bucket.head(folder + original);
+    assert.deepEqual(metadataHead.customMetadata, { ...metadata, read: "true" });
+    assert.deepEqual(metadataHead.httpMetadata, { contentType: "text/plain" });
+    assert.equal(metadataHead.size, Buffer.byteLength(body));
+    record.metadata = { status: "pass", customMetadata: metadataHead.customMetadata,
+      httpMetadata: metadataHead.httpMetadata, bytes: metadataHead.size,
+      sha256: createHash("sha256").update(updated.bytes).digest("hex"), exactBody: true,
+      operations: metadataCalls.map(([operation]) => operation), responseStatus: metadataResponse.status };
+    await snapshot("metadata-update");
     record.status = "pass";
   } catch (error) {
     record.status = "fail";
