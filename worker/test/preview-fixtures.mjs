@@ -4,7 +4,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { embeddedPdf, cachedPdfProbe, pdfComponentsExpression } from "./pdf-fixtures.mjs";
 import { inlineEmails } from "./email-fixtures.mjs";
+import { mediaFixtures, qualifyMedia } from "./media-fixtures.mjs";
 
+const mediaObjects = new Map();
 const folder = "db/qualification/";
 const text = "Unicode café Ω\n<b>preview-marker</b>\nlast-line";
 const email = [
@@ -40,7 +42,12 @@ function ordinaryPdf() {
 }
 
 export async function seedPreviews(state) {
+  const artifacts = new URL("../artifacts/previews/", import.meta.url);
+  await mkdir(artifacts, { recursive: true });
+  const media = await mediaFixtures(artifacts);
+  for (const [name, bytes, contentType] of media) mediaObjects.set(name, { key: folder + name, bytes, contentType });
   const corpus = [
+    ...media,
     ["case-text.txt", text, "text/plain"],
     ["case-json.json", JSON.stringify({ message: text }), "application/json"],
     ["case-html.html", text, "text/html"],
@@ -57,8 +64,6 @@ export async function seedPreviews(state) {
   for (const [name, body, contentType] of corpus) {
     state.objects.set(folder + name, { bytes: Buffer.from(body), httpMetadata: { contentType } });
   }
-  const artifacts = new URL("../artifacts/previews/", import.meta.url);
-  await mkdir(artifacts, { recursive: true });
   await writeFile(new URL("case-embedded.pdf", artifacts), state.objects.get(folder + "case-embedded.pdf").bytes);
   for (const prefix of ["", "instance/qualification/", "db/???/"]) {
     state.objects.set(prefix + "case-pdf.pdf", { bytes: ordinaryPdf(), httpMetadata: { contentType: "application/pdf" } });
@@ -344,6 +349,8 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
             record.rejectionControl = true;
           }
         }
+      } else if (mediaObjects.has(name)) {
+        await qualifyMedia(cdp, evaluate, name, record, evidence.network.slice(networkStart), mediaObjects.get(name));
       } else if (name.endsWith(".png")) {
         record.actual = await evaluate(`
           await wait(() => document.querySelector('.preview-image')?.naturalWidth === 1, 'Decoded local image');
