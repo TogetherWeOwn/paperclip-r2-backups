@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import worker from "../src/index.ts";
 import { mockBucket, signedAccess, nodeRequest } from "./fixtures.mjs";
+import { seedPreviews, qualifyPreviews } from "./preview-fixtures.mjs";
 
 const root = new URL("../dashboard/", import.meta.url);
 
@@ -54,7 +55,9 @@ async function connect(url) {
       if (message.error) call.reject(new Error(message.error.message));
       else call.resolve(message.result);
     } else {
-      listeners.get(message.method)?.(message.params);
+      for (const [name, listener] of listeners) {
+        if (name === message.method) listener(message.params);
+      }
       const event = events.get(message.method);
       if (event) { clearTimeout(event.timer); event.resolve(message.params); }
       events.delete(message.method);
@@ -92,6 +95,7 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
   const realFetch = globalThis.fetch;
   t.mock.method(globalThis, "fetch", async (url, options) => String(url) === "https://dashboard-client.cloudflareaccess.com/cdn-cgi/access/certs" ? Response.json({ keys: [access.jwk] }) : realFetch(url, options));
   const state = mockBucket();
+  const previews = seedPreviews(state);
   state.objects.set(".hidden", { bytes: new TextEncoder().encode("hidden") });
   const manifest = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
   const routes = [];
@@ -244,6 +248,9 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     await writeFile(new URL("../artifacts/dashboard-client.json", import.meta.url), JSON.stringify({ dashboardVersion: "1.2.0", routes, failures, result }, null, 2));
     const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
     await writeFile(new URL("../artifacts/dashboard-client.png", import.meta.url), Buffer.from(screenshot.data, "base64"));
+    await qualifyPreviews(cdp, origin, previews, browserEvidence);
+    assert.deepEqual(failures, [], "Click-driven previews must not introduce failed API/static requests");
+    assert.equal(new TextDecoder().decode(state.objects.get("db/qualification/case-text.txt").bytes), "saved UI marker");
   } finally {
     await mkdir(new URL("../artifacts/", import.meta.url), { recursive: true });
     if (cdp) {

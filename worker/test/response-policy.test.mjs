@@ -128,8 +128,13 @@ test("policy origin uses only validated effective URL origin, allowing HTTP only
 test("the sole inline bootstrap hash still identifies both original HTML script bodies", async () => {
   for (const path of ["index.html", "spa/index.html"]) {
     const html = await readFile(new URL(path, root), "utf8");
-    const inline = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)].filter((match) => !/\bsrc=/.test(match[1]));
-    assert.equal(inline.length, 1);
-    assert.equal(createHash("sha256").update(inline[0][2]).digest("base64"), "ivd6tHqEA4mIbBgQ80xHC/HM2TD8VhP3tLA5jLgSI+0=");
+    // Exact delimiters in the integrity-pinned fixture, not an HTML sanitizer.
+    const start = html.indexOf("<script>");
+    assert.ok(start >= 0);
+    assert.equal(html.indexOf("<script>", start + 1), -1);
+    const bodyStart = start + "<script>".length;
+    const end = html.indexOf("</script>", bodyStart);
+    assert.ok(end > bodyStart);
+    assert.equal(createHash("sha256").update(html.slice(bodyStart, end)).digest("base64"), "ivd6tHqEA4mIbBgQ80xHC/HM2TD8VhP3tLA5jLgSI+0=");
   }
 });
