@@ -255,7 +255,7 @@ async function pdfNote(request: Request, env: Env, url: URL): Promise<Response |
   } catch {
     return failure(500);
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     if (!eof) void reader.cancel().catch(() => {});
     reader.releaseLock();
   }
