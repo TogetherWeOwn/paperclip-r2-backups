@@ -1,4 +1,8 @@
 import { R2Explorer } from "r2-explorer";
+import {
+  CONTROL_LIMITS, ControlError, checkControl, checkQuery, controlFailure, controlRoute,
+  decodedKey, parseControl, readControl, replayControl,
+} from "./control.ts";
 
 interface Env {
   ASSETS: Fetcher;
@@ -92,20 +96,13 @@ async function verifyAccessJwt(token: string, team: string, aud: string): Promis
 const deny = (status: number, msg: string) =>
   new Response(msg, { status, headers: { "cache-control": "no-store", "content-type": "text/plain" } });
 
-const fromB64 = (s: string | null | undefined): string | null => {
-  if (!s) return null;
-  try {
-    return decodeURIComponent(escape(atob(s)));
-  } catch {
-    return null;
-  }
-};
+const fromB64 = decodedKey;
 
 /**
  * Keys a request would modify, derived from R2-Explorer's write endpoints.
  * Returns null for non-write requests, [] for a write we cannot attribute (denied).
  */
-async function writeTargets(req: Request, url: URL): Promise<string[] | null> {
+function writeTargets(req: Request, url: URL, body?: Record<string, unknown>): string[] | null {
   if (req.method !== "POST" && req.method !== "PUT" && req.method !== "DELETE") return null;
   const m = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/);
   if (!m) return null;
@@ -115,17 +112,11 @@ async function writeTargets(req: Request, url: URL): Promise<string[] | null> {
     return k === null ? [] : [k];
   }
   if (["move", "copy", "folder", "delete", "multipart/complete"].includes(rest)) {
-    let body: Record<string, string>;
-    try {
-      body = (await req.clone().json()) as Record<string, string>;
-    } catch {
-      return [];
-    }
-    const fields = ["key", "oldKey", "newKey", "sourceKey", "destinationKey"];
-    // A copy only reads the source; every other field is modified.
-    const keys = fields
-      .filter((f) => f in body && !(rest === "copy" && f === "sourceKey"))
-      .map((f) => fromB64(body[f]));
+    if (!body) return [];
+    // Match the pinned schemas' unknown-field stripping. A copy only reads its source.
+    const fields = rest === "move" ? ["oldKey", "newKey"]
+      : rest === "copy" ? ["destinationKey"] : ["key"];
+    const keys = fields.map((f) => fromB64(body[f]));
     return keys.some((k) => k === null) || keys.length === 0 ? [] : (keys as string[]);
   }
   // POST /api/buckets/:bucket/:key  (metadata edit)
@@ -206,13 +197,45 @@ export default {
     const csrf = csrfError(request, url);
     if (csrf) return deny(403, csrf);
 
+    // Bound controls after auth/CSRF, before any helper or Explorer reads a body.
+    let body: Record<string, unknown> | undefined;
+    let delegated = request;
+    try {
+      checkQuery(url);
+      const route = controlRoute(request.method, url);
+      if (route) {
+        const bytes = await readControl(request);
+        body = parseControl(bytes);
+        checkControl(route, body);
+        delegated = replayControl(request, bytes);
+      }
+      const binaryRoute = request.method === "POST"
+        && /^\/api\/buckets\/[^/]+\/(upload|multipart\/(create|upload))$/.test(url.pathname);
+      if (binaryRoute) {
+        if (fromB64(url.searchParams.get("key")) === null) throw new ControlError(400);
+        if (url.pathname.endsWith("/multipart/upload")) {
+          const id = url.searchParams.get("uploadId");
+          const part = url.searchParams.get("partNumber");
+          if (id === null || new TextEncoder().encode(id).byteLength > CONTROL_LIMITS.uploadIdBytes
+            || part === null || !/^\d+$/.test(part) || Number(part) < 1
+            || Number(part) > CONTROL_LIMITS.parts) throw new ControlError(400);
+        }
+      }
+      if (route === "metadata") {
+        const key = decodeURIComponent(url.pathname.split("/").pop()!);
+        if (fromB64(key) === null) throw new ControlError(400);
+      }
+    } catch (error) {
+      return controlFailure(error instanceof ControlError ? error.status : 500);
+    }
+
     // Keep the console inside the managed prefixes unless explicitly widened.
     const allowed = (env.WRITE_PREFIXES ?? DEFAULT_WRITE_PREFIXES)
       .split(",")
       .map((p) => p.trim())
       .filter(Boolean);
     if (!allowed.includes("*")) {
-      const targets = await writeTargets(request, url);
+      const targets = writeTargets(request, url, body);
       if (targets !== null) {
         if (targets.length === 0) return deny(403, "Write target could not be determined");
         const bad = targets.find((k) => !allowed.some((p) => k.startsWith(p)));
@@ -228,6 +251,6 @@ export default {
       return env.ASSETS.fetch(request);
     }
 
-    return explorer.fetch(request, env, ctx);
+    return explorer.fetch(delegated, env, ctx);
   },
 };
