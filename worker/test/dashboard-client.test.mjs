@@ -43,6 +43,7 @@ async function connect(url) {
   let id = 0;
   const pending = new Map();
   const events = new Map();
+  const listeners = new Map();
   ws.addEventListener("message", ({ data }) => {
     const message = JSON.parse(String(data));
     if (message.id) {
@@ -53,12 +54,14 @@ async function connect(url) {
       if (message.error) call.reject(new Error(message.error.message));
       else call.resolve(message.result);
     } else {
+      listeners.get(message.method)?.(message.params);
       const event = events.get(message.method);
       if (event) { clearTimeout(event.timer); event.resolve(message.params); }
       events.delete(message.method);
     }
   });
   return {
+    on(name, listener) { listeners.set(name, listener); },
     call(method, params = {}) {
       return new Promise((resolve, reject) => {
         const key = ++id;
@@ -121,6 +124,7 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
   const profile = await mkdtemp(join(tmpdir(), "backup-dashboard-chrome-"));
   let launched;
   let cdp;
+  const browserEvidence = { network: [], console: [], exceptions: [], controls: null, version: null };
   try {
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -130,10 +134,55 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     const target = await realFetch(`http://${debugOrigin.host}/json/new?about:blank`, { method: "PUT" }).then((r) => r.json());
     cdp = await connect(target.webSocketDebuggerUrl);
     await cdp.call("Page.enable");
+    await cdp.call("Runtime.enable");
+    await cdp.call("Log.enable");
+    await cdp.call("Network.enable");
+    browserEvidence.version = await cdp.call("Browser.getVersion");
+    cdp.on("Network.responseReceived", ({ response, type }) => browserEvidence.network.push({ url: response.url, status: response.status, mimeType: response.mimeType, headers: response.headers, type }));
+    cdp.on("Log.entryAdded", ({ entry }) => browserEvidence.console.push(entry));
+    cdp.on("Runtime.exceptionThrown", (event) => browserEvidence.exceptions.push(event));
+    await cdp.call("Page.addScriptToEvaluateOnNewDocument", { source: `
+      window.__policyEvents = [];
+      document.addEventListener('securitypolicyviolation', e => window.__policyEvents.push({directive:e.effectiveDirective, blocked:e.blockedURI, disposition:e.disposition}));
+    ` });
     await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
     const loaded = cdp.event("Page.loadEventFired");
     await cdp.call("Page.navigate", { url: origin });
     await loaded;
+    const controls = await cdp.call("Runtime.evaluate", {
+      expression: `(async () => {
+        if (!document.querySelector('#q-app .q-layout')) await new Promise((resolve, reject) => {
+          const observer = new MutationObserver(() => {
+            if (document.querySelector('#q-app .q-layout')) { observer.disconnect(); clearTimeout(timer); resolve(); }
+          });
+          const timer = setTimeout(() => { observer.disconnect(); reject(new Error('Dashboard mount deadline exceeded')); }, 10000);
+          observer.observe(document.body, {childList:true, subtree:true});
+        });
+        const script = document.createElement('script');
+        script.textContent = 'window.__fixtureInline = true';
+        document.body.append(script); script.remove();
+        const button = document.createElement('button');
+        button.setAttribute('onclick', 'window.__fixtureHandler = true');
+        document.body.append(button); button.click(); button.remove();
+        let evalDenied = false;
+        try { Function('return 7')(); } catch (e) { evalDenied = e instanceof EvalError; }
+        await new Promise(resolve => setTimeout(resolve, 0));
+        return {inlineDenied: !window.__fixtureInline, handlerDenied: !window.__fixtureHandler, evalDenied,
+          nativeResizeObserver: typeof ResizeObserver === 'function', userAgent: navigator.userAgent,
+          appMounted: !!document.querySelector('#q-app .q-layout'), violations: window.__policyEvents};
+      })()`,
+      allowUnsafeEvalBlockedByCSP: false, awaitPromise: true, returnByValue: true,
+    });
+    assert.equal(controls.exceptionDetails, undefined, JSON.stringify(controls.exceptionDetails));
+    browserEvidence.controls = controls.result.value;
+    assert.equal(browserEvidence.controls.inlineDenied, true);
+    assert.equal(browserEvidence.controls.handlerDenied, true);
+    assert.equal(browserEvidence.controls.evalDenied, true);
+    assert.equal(browserEvidence.controls.nativeResizeObserver, true);
+    assert.equal(browserEvidence.controls.appMounted, true);
+    for (const directive of ['script-src-elem', 'script-src-attr', 'script-src']) {
+      assert.ok(browserEvidence.controls.violations.some(v => v.directive === directive && v.disposition === 'enforce'), directive);
+    }
     const evaluated = await cdp.call("Runtime.evaluate", {
       expression: `(async () => {
         const m = await import('/assets/index.97b9144c.js');
@@ -196,11 +245,26 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
     await writeFile(new URL("../artifacts/dashboard-client.png", import.meta.url), Buffer.from(screenshot.data, "base64"));
   } finally {
+    await mkdir(new URL("../artifacts/", import.meta.url), { recursive: true });
+    if (cdp) {
+      try {
+        const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
+        await writeFile(new URL("../artifacts/dashboard-policy.png", import.meta.url), Buffer.from(screenshot.data, "base64"));
+      } catch (error) { browserEvidence.captureError = String(error); }
+    }
+    await writeFile(new URL("../artifacts/dashboard-policy.json", import.meta.url), JSON.stringify(browserEvidence, null, 2));
     cdp?.close();
-    if (launched?.chrome.exitCode === null && launched.chrome.signalCode === null) { launched.chrome.kill("SIGKILL"); await once(launched.chrome, "exit"); }
+    if (launched?.chrome.exitCode === null && launched.chrome.signalCode === null) {
+      const exited = once(launched.chrome, "exit");
+      const timer = setTimeout(() => launched.chrome.kill("SIGKILL"), 3000);
+      launched.chrome.kill("SIGTERM");
+      try { await exited; } finally { clearTimeout(timer); }
+    }
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    await rm(profile, { recursive: true, force: true });
+    // Chrome's profile-writing subprocess can outlive the parent briefly. Node's
+    // bounded ENOTEMPTY retry handles that teardown race without hiding failures.
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     assert.ok(!launched || launched.chrome.exitCode !== null || launched.chrome.signalCode !== null, "Chrome process cleanup");
   }
 });

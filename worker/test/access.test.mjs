@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
 import worker from "../src/index.ts";
 import { encode, keyPath, mockBucket, request, signedAccess } from "./fixtures.mjs";
 
@@ -16,7 +17,12 @@ async function authenticated(t, team) {
   let assets = 0;
   const env = {
     BACKUPS: state.bucket, ACCESS_TEAM_NAME: team, ACCESS_AUD: "fixture-aud",
-    ASSETS: { fetch: async () => { assets++; return new Response("protected snapshot"); } },
+    ASSETS: { fetch: async (req) => {
+      assets++;
+      const path = new URL(req.url).pathname;
+      if (path === "/assets/index.97b9144c.js") return new Response(await readFile(new URL("../dashboard/assets/index.97b9144c.js", import.meta.url)), { headers: { "content-type": "text/javascript" } });
+      return new Response("protected snapshot");
+    } },
   };
   return {
     ...state, env, access, assets: () => assets,

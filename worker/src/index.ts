@@ -124,7 +124,44 @@ function csrfError(req: Request, url: URL): string | null {
   return null;
 }
 
-export default {
+const SCRIPT_HASHES: Record<string, string> = {
+  "AuthLayout.db6e752c.js": "b5f5eaf25dfc166fd82988fb3fec42e696f94bde28bfe201e4943a5de92e97c1",
+  "EmailFilePage.8578c819.js": "59cf080d0ffae848aba35c72610c591db7feed35db911c71990ebb80a048a26d",
+  "ErrorNotFound.1cad377e.js": "2cad3eb1bb505fd24405b5625f90745637fcebbf4f9bd76614b85fab9dbcee35",
+  "LoginPage.c1ee667f.js": "74d14c5c727b0ccffabc4baf31b1cdde735ce5f8be2cf5c539ed0ff67aa46650",
+  "auth-store.ba1aa298.js": "3f62e5696ed8b8ea7a69a42ddbe5111132bab679d055d3f2fbbc3be94c802586",
+  "auth.315647f3.js": "7d536eb488ce6623303a61a2f897ec4f7164f795b20abbdfcfd3aee62d0d707b",
+  "bus.2c308485.js": "6048f86039d9eb6c10e93193dfbc2ea7c551c033ecd64989c127af5be70eeb3f",
+  "index.97b9144c.js": "4ae881a8bbe7b75a9880279f2bd224d135cb854aca8d61586323711c57fbdaaa",
+};
+const SCRIPT_PATHS = ["/assets/", "/spa/assets/"].flatMap((prefix) => Object.keys(SCRIPT_HASHES).map((name) => prefix + name));
+const NAVIGATION_POLICY = "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; sandbox allow-downloads";
+
+function documentPolicy(origin: string): string {
+  return "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; script-src " +
+    SCRIPT_PATHS.map((path) => origin + path).join(" ") + " 'sha256-ivd6tHqEA4mIbBgQ80xHC/HM2TD8VhP3tLA5jLgSI+0='; " +
+    "script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; media-src blob:; connect-src 'self' blob:; worker-src 'none'; frame-src 'self'";
+}
+
+async function protectedAsset(request: Request, env: Env, url: URL): Promise<Response> {
+  if (!SCRIPT_PATHS.includes(url.pathname)) return env.ASSETS.fetch(request);
+  // Never allow a trusted script URL to redirect, become an HTML fallback, or reuse
+  // unverified partial/cached bytes. Only these static scripts are buffered, not R2.
+  const headers = new Headers(request.headers);
+  for (const name of ["if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "if-range", "range"]) headers.delete(name);
+  const asset = await env.ASSETS.fetch(new Request(url.origin + url.pathname, { method: "GET", headers, redirect: "manual" }));
+  if (asset.status !== 200 || asset.headers.has("location") ||
+    !["text/javascript", "application/javascript"].includes((asset.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase())) {
+    void asset.body?.cancel().catch(() => {});
+    return failure(500);
+  }
+  const bytes = await asset.arrayBuffer();
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  if (hash !== SCRIPT_HASHES[url.pathname.slice(url.pathname.lastIndexOf("/") + 1)]) return failure(500);
+  return new Response(request.method === "HEAD" ? null : bytes, { headers: asset.headers });
+}
+
+const handler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const team = env.ACCESS_TEAM_NAME?.trim();
     const aud = env.ACCESS_AUD?.trim();
@@ -168,10 +205,27 @@ export default {
     // Worker-first assets stay behind the same Access and method checks as the API.
     if (request.method !== "GET" && request.method !== "HEAD") return deny(405, "Method not allowed");
     try {
-      return await env.ASSETS.fetch(request);
+      return await protectedAsset(request, env, url);
     } catch {
       console.error("Backup console assets unavailable");
       return failure(500);
     }
+  },
+};
+
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    // The URL's effective origin is platform-controlled, never an arbitrary Host,
+    // forwarded header, object key or metadata value. HTTP is fixture-loopback only.
+    const validOrigin = url.protocol === "https:" || (url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname));
+    const api = url.pathname === "/api" || url.pathname.startsWith("/api/");
+    const response = validOrigin ? await handler.fetch(request, env, ctx) : deny(500, "Invalid console origin");
+    const headers = new Headers(response.headers);
+    headers.set("content-security-policy", api || !validOrigin ? NAVIGATION_POLICY : documentPolicy(url.origin));
+    headers.set("x-content-type-options", "nosniff");
+    // Revalidation cannot resurrect HTML without this response policy.
+    if (!api) headers.set("cache-control", "no-store");
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
   },
 };

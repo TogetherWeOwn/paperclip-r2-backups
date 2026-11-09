@@ -34,6 +34,31 @@ Files remain ordinary R2 objects; there is no storage migration or client-side e
 `workers_dev` and `preview_urls` remain false. The configuration has no public
 workers.dev URL, route, custom domain or account identifier.
 
+## Preview response policy — candidate, not a safety verdict
+
+Every response carries enforced CSP and `X-Content-Type-Options: nosniff` after
+metadata handling. Documents/static responses allow only the 16 exact pinned
+JavaScript URLs (root and supplied SPA subtree) and the original loader's SHA256
+inline-script hash. No script `self`, inline handlers, eval, real workers, external
+scripts or optional GitHub update connection is allowed. Trusted script requests
+are fetched without redirects/ranges/conditional reuse, checked for JavaScript
+MIME and exact original SHA256, then served without altering their bytes. Only
+static script bytes are buffered; R2 objects remain streams. Static responses are
+no-store and retain policy on revalidation responses. HTTPS effective URL origins
+are required outside the non-deploy loopback fixture; forwarded headers are not
+policy inputs.
+
+API responses have a separate non-executable document-navigation policy with
+`sandbox allow-downloads`, preserving attachment bytes and metadata. This does not
+constrain content fetched into the parent document. The pinned preview renderers
+still interpret untrusted markup with innerHTML. CSP is **not sanitization**, an
+inert-text renderer, a PDF.js patch or a privilege boundary. Inline styling and
+same-origin frames remain for the shipped client; remote email resources are
+intentionally blocked. The shipped PDF fake-worker/non-eval path, real preview
+behavior, client enforcement and residual DOM/UI integrity risks require exact-head
+Actions qualification and independent Security then QA acceptance before readiness.
+No inherited preview finding is cleared by these headers alone.
+
 ## Supported contracts
 
 All bucket routes use `/api/buckets/BACKUPS`. Keys are base64-encoded UTF-8;
