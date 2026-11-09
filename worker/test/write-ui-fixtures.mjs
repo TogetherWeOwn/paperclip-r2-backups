@@ -170,11 +170,19 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     assert.deepEqual(mutations(), [...afterDelete, ["put", folder + child]]);
     await snapshot("folder-create");
 
-    await evaluate(`const row = rows().find(row => filename(row) === values[0]);
-      if (!row) throw new Error('Missing created folder'); row.querySelector('td').click();
-      await wait(() => location.pathname === values[1] &&
-        names().length === 0 && !document.querySelector('.q-table__progress'), 'Created folder navigation');`,
-      [child, '/BACKUPS/files/' + Buffer.from(folder + child).toString('base64')]);
+    const folderPoint = await evaluate(`const row = rows().find(row => filename(row) === values[0]);
+      if (!row) throw new Error('Missing created folder');
+      row.scrollIntoView({ block: 'center' });
+      const rect = row.querySelector('td').getBoundingClientRect();
+      return { x: rect.x + Math.min(40, rect.width / 2), y: rect.y + rect.height / 2 };`, [child]);
+    await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...folderPoint });
+    for (const clickCount of [1, 2]) {
+      await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount, ...folderPoint });
+      await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount, ...folderPoint });
+    }
+    record.folderPath = await evaluate(`await wait(() => location.pathname === values[0] &&
+      names().length === 0 && !document.querySelector('.q-table__progress'), 'Created folder navigation');
+      return location.pathname;`, ['/BACKUPS/files/' + Buffer.from(folder + child).toString('base64')]);
     await snapshot("folder-open");
 
     await newMenu("New File");
