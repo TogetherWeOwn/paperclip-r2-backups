@@ -71,7 +71,26 @@ export async function qualifyListing(cdp, origin, evidence, pages) {
     const loaded = cdp.event("Page.loadEventFired");
     await cdp.call("Page.navigate", { url: `${origin}/BACKUPS/files/${Buffer.from(folder).toString("base64")}` });
     await loaded;
-    record.snapshots.first = await evaluate(`await wait(() => settled() && filenames().length === 24, 'First bounded page'); return filenames();`);
+    record.snapshots.initial = await evaluate(`await wait(() => settled() && filenames().length === 24, 'First bounded page'); return filenames();`);
+    // The mounted table starts name-descending. New ascending R2 pages would
+    // prepend above the scroll anchor and can trigger another load immediately.
+    // Use the actual sortable header so each appended page stays below the view.
+    record.sortStates = [];
+    for (let click = 0; click < 2; click++) {
+      const sort = await evaluate(`const header = [...document.querySelectorAll('thead th')].find(el => el.innerText.trim().startsWith('Name'));
+        if (!header) throw new Error('Pinned Name sort header missing');
+        const box = header.getBoundingClientRect(); return {x: box.x + box.width / 2, y: box.y + box.height / 2};`);
+      await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", ...sort, button: "left", clickCount: 1 });
+      await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", ...sort, button: "left", clickCount: 1 });
+      record.sortStates.push(await evaluate(`await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const header = [...document.querySelectorAll('thead th')].find(el => el.innerText.trim().startsWith('Name'));
+        return {classes: header.className, ascending: header.classList.contains('sorted') && !header.classList.contains('sort-desc')};`));
+      if (record.sortStates.at(-1).ascending) break;
+    }
+    assert.equal(record.sortStates.at(-1).ascending, true, "Actual Name header selects ascending sort");
+    record.snapshots.first = await evaluate(`await wait(() => settled() && filenames().length === 24 &&
+      filenames().filter(name => name.startsWith('item-')).every((name, i) => name === 'item-' + String(i).padStart(2, '0') + '.txt'),
+      'Ascending name sort'); return filenames();`);
     assert.ok(!record.snapshots.first.some(name => name.startsWith(".")), "Hidden backend object is filtered by the actual client");
     await screenshot("first-page");
     for (const [page, count] of [[2, 49], [3, 64]]) {
@@ -80,8 +99,8 @@ export async function qualifyListing(cdp, origin, evidence, pages) {
         const box = container.getBoundingClientRect(); return {x: Math.min(innerWidth - 30, box.right - 30), y: Math.min(innerHeight - 80, box.bottom - 80),
           top: container.scrollTop, height: container.scrollHeight, viewport: container.clientHeight,
           deltaY: Math.ceil(container.scrollHeight - container.clientHeight - container.scrollTop)};`);
-      assert.ok(scroll.deltaY > 0, "Each page requires an actual downward scroll");
       record.scrolls.push({ page, ...scroll });
+      assert.ok(scroll.deltaY > 0, "Each page requires an actual downward scroll");
       // Stop at the current bottom: an oversized wheel can consume the next
       // appended page before its intermediate row-count assertion observes it.
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseWheel", x: scroll.x, y: scroll.y, deltaX: 0, deltaY: scroll.deltaY });

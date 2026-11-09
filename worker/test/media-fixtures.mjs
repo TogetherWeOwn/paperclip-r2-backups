@@ -1,40 +1,22 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 
-const execute = promisify(execFile);
-
 export async function mediaFixtures(artifacts) {
-  const directory = await mkdtemp(join(tmpdir(), "backup-media-fixtures-"));
-  try {
-    // Use only the runner's existing encoder. Never install a tool or download
-    // sample media: both sources below are authored, finite lavfi signals.
-    const { stdout } = await execute("ffmpeg", ["-version"], { timeout: 5000, maxBuffer: 65536 });
-    const corpus = [];
-    const receipts = { encoder: stdout.split("\n", 1)[0], files: [] };
-    for (const [name, contentType, input, codec] of [
-      ["case-audio.mp3", "audio/mpeg", "sine=frequency=440:sample_rate=44100:duration=1", ["-c:a", "libmp3lame", "-b:a", "64k"]],
-      ["case-video.mp4", "video/mp4", "testsrc2=size=64x48:rate=10:duration=1", ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]],
-    ]) {
-      const path = join(directory, name);
-      const args = ["-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-f", "lavfi", "-i", input, ...codec, "-threads", "1", "-y", path];
-      await execute("ffmpeg", args, { timeout: 10000, maxBuffer: 65536 });
-      const bytes = await readFile(path);
-      assert.ok(bytes.length > 100 && bytes.length < 65536, "Authored media stays below the fixture byte bound");
-      corpus.push([name, bytes, contentType]);
-      receipts.files.push({ name, contentType, source: input, args, bytes: bytes.length,
-        sha256: createHash("sha256").update(bytes).digest("hex") });
-      await writeFile(new URL(name, artifacts), bytes);
-    }
-    await writeFile(new URL("media-sources.json", artifacts), JSON.stringify(receipts, null, 2));
-    return corpus;
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  // No attributable corpus or exact encoder operation is approved. Fail closed
+  // before probing PATH: runner availability is not provenance or permission.
+  await writeFile(new URL("media-sources.json", artifacts), JSON.stringify({
+    status: "unavailable", generation: "deferred", files: [],
+    missing: ["authenticated source and toolchain input lock", "exact build recipe",
+      "trusted build/output record", "enforceable acquisition/build/cleanup bounds", "independent approval"],
+    requiredSignals: [
+      { name: "case-audio.mp3", contentType: "audio/mpeg", source: "sine=frequency=440:sample_rate=44100:duration=1",
+        codec: ["-c:a", "libmp3lame", "-b:a", "64k"] },
+      { name: "case-video.mp4", contentType: "video/mp4", source: "testsrc2=size=64x48:rate=10:duration=1",
+        codec: ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"] },
+    ],
+  }, null, 2));
+  throw new Error("Media qualification unavailable: no approved attributable corpus or encoder operation");
 }
 
 export async function qualifyMedia(cdp, evaluate, name, record, responses, expected) {
