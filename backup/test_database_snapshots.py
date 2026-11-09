@@ -491,6 +491,8 @@ class BackupSnapshotTests(RunFixture):
         with open(path) as stream:
             env = dict(line.strip().split("=", 1) for line in stream
                        if line.strip() and not line.lstrip().startswith("#"))
+        # Replace the template's required placeholder with a valid bucket root.
+        env["BACKUP_BUCKET"] = "test-backups"
         with mock.patch.object(s, "load_sources") as load_sources:
             cfg = b.load_config(env)
         self.assertEqual(cfg.sources, ())
