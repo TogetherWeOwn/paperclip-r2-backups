@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const folder = "db/ui-writes/";
 const original = "source-café.txt";
@@ -17,12 +19,19 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
   const artifacts = new URL("../artifacts/write-ui/", import.meta.url);
   await mkdir(artifacts, { recursive: true });
   const record = evidence.writeUi = { status: "unverified", steps: [] };
+  const uploadDirectory = await mkdtemp(join(tmpdir(), "backup-dashboard-upload-"));
+  const uploadName = "uploaded-café.txt";
+  const uploadBytes = Buffer.from("Authored file chooser upload café Ω\n");
   const mutations = () => state.calls.filter(([operation, key]) =>
     ["put", "delete", "create", "resume"].includes(operation) && typeof key === "string" && key.startsWith(folder))
     .map(([operation, key]) => [operation, key]);
-  const evaluate = async (source) => {
-    const result = await cdp.call("Runtime.evaluate", {
-      expression: `(async () => {
+  const evaluate = async (source, values = []) => {
+    const global = await cdp.call("Runtime.evaluate", { expression: "globalThis", allowUnsafeEvalBlockedByCSP: false });
+    assert.equal(global.exceptionDetails, undefined);
+    const result = await cdp.call("Runtime.callFunctionOn", {
+      objectId: global.result.objectId,
+      arguments: [{ value: values }],
+      functionDeclaration: `async function(values) {
         const filename = row => [...(row.querySelector('td')?.childNodes || [])]
           .filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim();
         const rows = () => [...document.querySelectorAll('tbody tr')].filter(row => filename(row));
@@ -43,8 +52,8 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
           element.click();
         };
         ${source}
-      })()`, allowUnsafeEvalBlockedByCSP: false, awaitPromise: true, returnByValue: true,
-    });
+      }`, awaitPromise: true, returnByValue: true,
+    }).finally(() => cdp.call("Runtime.releaseObject", { objectId: global.result.objectId }));
     assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
     return result.result.value;
   };
@@ -58,18 +67,27 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     await writeFile(new URL(`${step}.png`, artifacts), Buffer.from(data, "base64"));
   };
   const menu = async (name, action) => {
-    await evaluate(`const row = rows().find(row => filename(row) === ${JSON.stringify(name)});
+    await evaluate(`const row = rows().find(row => filename(row) === values[0]);
       if (!row) throw new Error('Missing source row');
       const button = row.querySelector('button'); if (!button) throw new Error('Missing row menu'); button.click();
       await wait(() => document.querySelector('.q-menu .q-item'), 'File menu');
-      click('.q-menu .q-item', ${JSON.stringify(action)});`);
+      click('.q-menu .q-item', values[1]);`, [name, action]);
   };
-  const dialog = async (action) => evaluate(`await wait(() => control('.q-dialog button', ${JSON.stringify(action)}), 'Write dialog control');
-    click('.q-dialog button', ${JSON.stringify(action)});`);
+  const newMenu = async (action) => evaluate(`await wait(() => control('button', 'New'), 'New button');
+    click('button', 'New');
+    await wait(() => control('.q-menu .q-item', values[0]), 'New menu control');
+    click('.q-menu .q-item', values[0]);`, [action]);
+  const enterName = async (value) => {
+    await evaluate(`await wait(() => document.querySelector('.q-dialog input')?.getBoundingClientRect().width > 0, 'New name input');
+      const input = document.querySelector('.q-dialog input'); input.focus(); input.select();`);
+    await cdp.call("Input.insertText", { text: value });
+  };
+  const dialog = async (action) => evaluate(`await wait(() => control('.q-dialog button', values[0]), 'Write dialog control');
+    click('.q-dialog button', values[0]);`, [action]);
   const closed = async () => evaluate("await wait(() => !document.querySelector('.q-dialog'), 'Closed write dialog');");
   const names = async (expected) => {
     const actual = await evaluate(`await wait(() => !document.querySelector('.q-table__progress') &&
-      JSON.stringify(names().sort()) === ${JSON.stringify(JSON.stringify([...expected].sort()))}, 'Updated file rows'); return names();`);
+      JSON.stringify(names().sort()) === JSON.stringify(values[0]), 'Updated file rows'); return names();`, [[...expected].sort()]);
     assert.deepEqual(actual.sort(), [...expected].sort());
   };
   const retained = (name) => {
@@ -80,6 +98,7 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     assert.equal(object.httpMetadata.contentType, "text/plain");
   };
   try {
+    await writeFile(join(uploadDirectory, uploadName), uploadBytes);
     const loaded = cdp.event("Page.loadEventFired");
     await cdp.call("Page.navigate", { url: `${origin}/BACKUPS/files/${Buffer.from(folder).toString("base64")}` });
     await loaded;
@@ -131,6 +150,75 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     assert.equal(state.objects.has(folder + renamed), false);
     assert.deepEqual(mutations(), [...afterRename, ["delete", folder + renamed]]);
     await snapshot("delete");
+    const afterDelete = mutations();
+
+    await newMenu("New Folder");
+    await enterName("cancelled-Ω");
+    await dialog("Cancel");
+    await closed();
+    await names([original]);
+    assert.deepEqual(mutations(), afterDelete, "Cancelling a new folder must not create its marker");
+    await snapshot("folder-cancel");
+
+    const child = "created-Ω/";
+    await newMenu("New Folder");
+    await enterName(child.slice(0, -1));
+    await dialog("Create");
+    await closed();
+    await names([original, child]);
+    assert.equal(state.objects.get(folder + child).bytes.length, 0);
+    assert.deepEqual(mutations(), [...afterDelete, ["put", folder + child]]);
+    await snapshot("folder-create");
+
+    await evaluate(`const row = rows().find(row => filename(row) === values[0]);
+      if (!row) throw new Error('Missing created folder'); row.querySelector('td').click();
+      await wait(() => location.pathname === values[1] &&
+        names().length === 0 && !document.querySelector('.q-table__progress'), 'Created folder navigation');`,
+      [child, '/BACKUPS/files/' + Buffer.from(folder + child).toString('base64')]);
+    await snapshot("folder-open");
+
+    await newMenu("New File");
+    await enterName("cancelled.txt");
+    await dialog("Cancel");
+    await closed();
+    await names([]);
+    assert.deepEqual(mutations(), [...afterDelete, ["put", folder + child]]);
+    await snapshot("file-cancel");
+
+    const empty = "empty-café.txt";
+    await newMenu("New File");
+    await enterName(empty);
+    await dialog("Create");
+    await closed();
+    await names([empty]);
+    const emptyObject = state.objects.get(folder + child + empty);
+    assert.equal(emptyObject.bytes.length, 0);
+    assert.deepEqual(emptyObject.httpMetadata, { contentType: "text/plain" });
+    assert.deepEqual(mutations(), [...afterDelete, ["put", folder + child], ["put", folder + child + empty]]);
+    await snapshot("file-create");
+
+    await cdp.call("Page.setInterceptFileChooserDialog", { enabled: true });
+    try {
+      const chooser = cdp.event("Page.fileChooserOpened");
+      await newMenu("Upload Files");
+      const { backendNodeId, mode } = await chooser;
+      assert.equal(mode, "selectMultiple");
+      await cdp.call("DOM.setFileInputFiles", { backendNodeId, files: [join(uploadDirectory, uploadName)] });
+      await names([empty, uploadName]);
+      await evaluate("await wait(() => document.body.innerText.includes('Files Uploaded!'), 'Completed upload notification');");
+    } finally {
+      await cdp.call("Page.setInterceptFileChooserDialog", { enabled: false });
+    }
+    const uploaded = state.objects.get(folder + child + uploadName);
+    assert.deepEqual(Buffer.from(uploaded.bytes), uploadBytes);
+    assert.deepEqual(uploaded.httpMetadata, { contentType: "text/plain" });
+    assert.deepEqual(uploaded.customMetadata, {});
+    assert.deepEqual(mutations(), [...afterDelete, ["put", folder + child],
+      ["put", folder + child + empty], ["put", folder + child + uploadName]]);
+    retained(original);
+    record.upload = { name: uploadName, bytes: uploadBytes.length, httpMetadata: uploaded.httpMetadata,
+      customMetadata: uploaded.customMetadata, exactBody: true };
+    await snapshot("file-upload");
     record.status = "pass";
   } catch (error) {
     record.status = "fail";
@@ -138,6 +226,8 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     try { await snapshot("failure"); } catch (captureError) { record.captureError = String(captureError).slice(0, 256); }
     throw error;
   } finally {
+    await rm(uploadDirectory, { recursive: true, force: true });
+    record.uploadInputCleanup = "removed";
     await writeFile(new URL("write-ui.json", artifacts), JSON.stringify(record, null, 2));
   }
 }
