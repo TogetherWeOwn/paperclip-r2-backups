@@ -163,12 +163,19 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
         record.actual = await evaluate(`
           await wait(() => document.querySelectorAll('#pdfvuer canvas').length === 2 && [...document.querySelectorAll('#pdfvuer .page')].every(page => page.dataset.loaded === 'true'), 'Two rendered PDF pages');
           const canvases = [...document.querySelectorAll('#pdfvuer canvas')];
-          const pages = canvases.map(canvas => {
+          const measure = (canvas, threshold = Infinity) => {
             const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
             let ink = 0;
-            for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 3] && pixels[i] < 200 && pixels[i + 1] < 200 && pixels[i + 2] < 200) ink++;
+            for (let i = 0; i < pixels.length; i += 4) {
+              if (pixels[i + 3] && pixels[i] < 200 && pixels[i + 1] < 200 && pixels[i + 2] < 200) ink++;
+              if (ink > threshold) break;
+            }
             return {width: canvas.width, height: canvas.height, ink};
-          });
+          };
+          // PDF.js sets data-loaded when drawing starts, before its asynchronous
+          // paint task resolves. Require the same visible glyphs before sampling.
+          await wait(() => canvases.every(canvas => measure(canvas, 100).ink > 100), 'Both PDF canvases contain visible glyphs');
+          const pages = canvases.map(canvas => measure(canvas));
           return {pages, annotation: !!document.querySelector('#pdfvuer .annotationLayer'), workers: performance.getEntriesByType('resource').filter(r => /worker/i.test(r.name)).map(r => r.name)};
         `);
         assert.equal(record.actual.pages.length, 2);

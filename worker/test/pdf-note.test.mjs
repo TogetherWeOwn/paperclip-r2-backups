@@ -130,11 +130,24 @@ test("Note stalled reads expire at an absolute deadline and cancel the backend b
   let cancelled = false;
   f.env.ASSETS.fetch = async () => new Response(new ReadableStream({ cancel() { cancelled = true; } }), { headers: { "content-type": "image/svg+xml" } });
   t.mock.timers.enable({ apis: ["setTimeout"] });
+  const scheduled = globalThis.setTimeout;
+  let armed;
+  const ready = new Promise(resolve => { armed = resolve; });
+  t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) => {
+    const timer = scheduled(callback, delay, ...args);
+    if (delay === 10_000) armed();
+    return timer;
+  });
   const pending = f.send(request(image("IA==")));
-  await new Promise(resolve => setImmediate(resolve));
-  t.mock.timers.tick(10_000);
+  // JWT verification crosses native crypto tasks before the body timer exists.
+  // Advance only after registration, never after an assumed event-loop turn.
+  await ready;
+  t.mock.timers.tick(9_999);
+  assert.equal(cancelled, false);
+  t.mock.timers.tick(1);
   closed(await pending, 500);
   assert.equal(cancelled, true);
+  t.mock.restoreAll();
   t.mock.timers.reset();
 });
 
