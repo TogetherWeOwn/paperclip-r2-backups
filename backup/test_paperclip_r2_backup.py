@@ -42,6 +42,9 @@ class FakeRclone:
         b.assert_managed(prefix)
         return [b.Obj(k, s) for k, s in self.store.items() if k.startswith(prefix)]
 
+    def bucket_inventory(self):
+        return [b.Obj(k, s) for k, s in self.store.items()]
+
     def upload(self, local, key):
         b.assert_managed(key)
         if self.fail_upload:
@@ -897,17 +900,17 @@ class InheritedBoundaryTests(RunFixture):
 
     def test_status_inventory_failure_retains_previous_status(self):
         rc = FakeRclone([b.Obj(b.STATUS_KEY, 1000)])
-        original = rc.list
+        original = rc.bucket_inventory
         calls = 0
 
-        def inventory(prefix):
+        def inventory():
             nonlocal calls
             calls += 1
-            if calls > len(b.MANAGED_PREFIXES):
+            if calls > 2:
                 raise b.BackupError("inventory failed")
-            return original(prefix)
+            return original()
 
-        with mock.patch.object(rc, "list", side_effect=inventory):
+        with mock.patch.object(rc, "bucket_inventory", side_effect=inventory):
             self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
         self.assertEqual(rc.store[b.STATUS_KEY], 1000)
         self.assertNotIn(b.STATUS_KEY, rc.puts)
@@ -917,6 +920,309 @@ class InheritedBoundaryTests(RunFixture):
         with mock.patch.object(rc, "put_bytes", side_effect=b.BackupError("write failed")):
             self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
         self.assertNotIn(b.STATUS_KEY, rc.puts)
+
+
+class BucketInventoryTests(unittest.TestCase):
+    def test_complete_read_only_listing_includes_unmanaged_objects(self):
+        rc = b.Rclone("bk")
+        items = [{"Path": key, "Size": size, "IsDir": False} for key, size in
+                 (("db/a", 2), ("ops/archive", 39426312374), ("other", 0))]
+        with mock.patch.object(rc, "_run", return_value=json.dumps(items)) as run:
+            self.assertEqual([(o.key, o.size) for o in rc.bucket_inventory()],
+                             [(i["Path"], i["Size"]) for i in items])
+        run.assert_called_once_with(["lsjson", "-R", "--files-only", "--no-mimetype",
+                                     "--no-modtime", "R2:bk/"])
+        with mock.patch.object(rc, "_run", return_value="[]"):
+            self.assertEqual(rc.bucket_inventory(), [])
+        for key in ("ops/archive", "other"):
+            with self.subTest(key=key), mock.patch.object(rc, "_run") as run:
+                for operation in (rc.delete, lambda k: rc.upload("unused", k),
+                                  lambda k: rc.put_bytes(b"unused", k)):
+                    with self.assertRaises(b.BackupError):
+                        operation(key)
+                run.assert_not_called()
+
+    def test_bucket_paths_fail_closed_at_config_and_rclone_boundaries(self):
+        for bucket in ("my-bucket/backups", "my-bucket/", "/my-bucket", ".", "..",
+                       "my-bucket\\backups", "R2:my-bucket", "my bucket", ""):
+            with self.subTest(bucket=bucket), mock.patch.object(b.subprocess, "run") as run:
+                for construct in (lambda: b.load_config({"BACKUP_BUCKET": bucket}),
+                                  lambda: b.Config(bucket, "unused", "unused"),
+                                  lambda: b.Rclone(bucket)):
+                    with self.assertRaises(b.BackupError):
+                        construct()
+                run.assert_not_called()
+        cfg = b.load_config({"BACKUP_BUCKET": "my-bucket"})
+        rc = b.Rclone(cfg.bucket)
+        items = [{"Path": "ops/archive", "Size": 39426312374, "IsDir": False},
+                 {"Path": "backups/db/dump", "Size": 5, "IsDir": False}]
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(rc, "_run", return_value=json.dumps(items)) as run:
+            self.assertEqual(sum(o.size for o in rc.bucket_inventory()), 39426312379)
+        self.assertEqual(run.call_args.args[0][-1], "R2:my-bucket/")
+
+    def test_inventory_allows_binary_override_but_rejects_filter(self):
+        env = {"BACKUP_BUCKET": "bk", "RCLONE_BIN": "/reviewed/bin/rclone"}
+        proc = mock.Mock(returncode=0, stdout=b"[]")
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(b.subprocess, "run", return_value=proc) as run:
+            cfg = b.load_config()
+            rc = b.Rclone(cfg.bucket, cfg.rclone_bin)
+            self.assertEqual(rc.bucket_inventory(), [])
+            self.assertEqual(run.call_args.args[0], [env["RCLONE_BIN"], "lsjson", "-R",
+                "--files-only", "--no-mimetype", "--no-modtime", "R2:bk/"])
+            run.reset_mock()
+            with mock.patch.dict(os.environ, {"RCLONE_EXCLUDE": "ops/**"}):
+                with self.assertRaisesRegex(b.BackupError, "rclone environment options"):
+                    rc.bucket_inventory()
+            run.assert_not_called()
+
+    def test_inventory_rejects_inherited_rclone_options(self):
+        rc = b.Rclone("bk")
+        for option in ("EXCLUDE", "INCLUDE", "FILTER", "FILES_FROM", "MAX_DEPTH",
+                       "MIN_SIZE", "MAX_AGE", "EXCLUDE_IF_PRESENT", "FUTURE_OPTION"):
+            with self.subTest(option=option), \
+                    mock.patch.dict(os.environ, {"RCLONE_" + option: "value"}, clear=True), \
+                    mock.patch.object(rc, "_run", return_value="[]") as run:
+                with self.assertRaisesRegex(b.BackupError, "rclone environment options"):
+                    rc.bucket_inventory()
+                run.assert_not_called()
+        with mock.patch.dict(os.environ, {"RCLONE_CONFIG": "/unused/config",
+                "RCLONE_CONFIG_R2_TYPE": "s3"}, clear=True), \
+                mock.patch.object(rc, "_run", return_value="[]"):
+            self.assertEqual(rc.bucket_inventory(), [])
+
+    def test_unknown_inventory_never_becomes_empty(self):
+        rc = b.Rclone("bk")
+        valid = {"Path": "ops/archive", "Size": 10, "IsDir": False}
+        malformed = ["", "[", "null", "{}", '[{"Path":"a"}]',
+                     json.dumps([valid, valid]), json.dumps([valid, None])]
+        for size in (-1, None, "10", 1.5, True):
+            malformed.append(json.dumps([dict(valid, Size=size)]))
+        for path in (None, "", 5):
+            malformed.append(json.dumps([dict(valid, Path=path)]))
+        malformed.append(json.dumps([dict(valid, IsDir=True)]))
+        for out in malformed:
+            with self.subTest(out=out), mock.patch.object(rc, "_run", return_value=out):
+                with self.assertRaisesRegex(b.BackupError, "invalid whole-bucket inventory"):
+                    rc.bucket_inventory()
+        # Even a partial stdout with a nonzero exit (including missing bucket) fails.
+        for code in (1, 3):
+            proc = mock.Mock(returncode=code, stdout=json.dumps([valid]).encode())
+            with self.subTest(code=code), mock.patch.object(b.subprocess, "run", return_value=proc):
+                with self.assertRaises(b.BackupError):
+                    rc.bucket_inventory()
+
+
+class WholeBucketCapTests(RunFixture):
+    ARCHIVE_KEY = "ops/storage-reclaim-20261109/native-db/archive.sql.gz"
+    ARCHIVE_BYTES = 39426312374
+    CAP = 250000000000
+    DATA = b'{"ok":true}'
+
+    def instance(self):
+        return f"instance/{self.now:%Y/%m/%d}/paperclip-instance-{self.now:%Y%m%d-%H%M%S}.tar.gz"
+
+    def test_archive_reservation_exact_cap_and_one_byte_over(self):
+        self.assertEqual(self.CAP - self.ARCHIVE_BYTES, 210573687626)
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        for unrelated in (0, 12345):
+            for over in (0, 1):
+                with self.subTest(unrelated=unrelated, over=over):
+                    native_size = os.path.getsize(dump)
+                    occupancy = self.CAP - self.ARCHIVE_BYTES - unrelated - native_size - 10 - len(self.DATA) + over
+                    rc = NativeIntegrityRclone([b.Obj(self.instance(), 10),
+                                     b.Obj("db/untimed-occupancy", occupancy),
+                                     b.Obj(self.ARCHIVE_KEY, self.ARCHIVE_BYTES),
+                                     b.Obj("unrelated/root", unrelated)])
+                    rc.upload(dump, b.db_key_for(dump))
+                    rc.uploaded.clear()
+                    self.cfg.cap_bytes = self.CAP
+                    # Old managed-only admission passes both; whole-bucket rejects +1.
+                    self.assertLess(native_size + occupancy + 10 + len(self.DATA), self.CAP)
+                    with mock.patch.object(b, "status_data", return_value=self.DATA):
+                        self.assertEqual(b.run(self.cfg, rc, self.now),
+                                         b.EXIT_CAP if over else b.EXIT_OK)
+                    self.assertEqual((rc.uploaded, rc.deleted), ([], []))
+                    self.assertEqual(rc.store[self.ARCHIVE_KEY], self.ARCHIVE_BYTES)
+                    self.assertEqual(rc.store["unrelated/root"], unrelated)
+                    self.assertEqual(sum(rc.store.values()), self.CAP if not over else self.CAP - len(self.DATA) + 1)
+                    self.assertEqual(b.STATUS_KEY in rc.puts, not over)
+
+    def test_incoming_exact_freed_and_status_delta_count_once(self):
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        incoming = b.Obj(b.db_key_for(dump), os.path.getsize(dump))
+        old = objs_for([self.now - dt.timedelta(days=i) for i in range(1, 11)], 100)
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        for previous in (2, 2048):
+            for over in (0, 1):
+                with self.subTest(previous=previous, over=over):
+                    rc = FakeRclone(old + [b.Obj(self.instance(), 30),
+                        b.Obj(self.ARCHIVE_KEY, self.ARCHIVE_BYTES), b.Obj("other", 123),
+                        b.Obj("status/restore-last.json", 23), b.Obj(b.STATUS_KEY, previous)])
+                    managed = {p: rc.list(p) for p in b.MANAGED_PREFIXES}
+                    managed[b.DB_PREFIX].append(incoming)
+                    plans = b.compute_retention(self.cfg, managed, self.now, True)
+                    expected_delete = [k for plan in plans.values() for k in plan.delete]
+                    self.assertTrue(expected_delete)
+                    freed = sum(rc.store[k] for k in expected_delete)
+                    base = sum(rc.store.values()) + incoming.size - freed
+                    self.cfg.cap_bytes = base + max(0, len(self.DATA) - previous) - over
+                    with mock.patch.object(b, "status_data", return_value=self.DATA), \
+                            mock.patch.object(b, "projected_with_status", wraps=b.projected_with_status) as projection:
+                        code = b.run(self.cfg, rc, self.now)
+                    self.assertEqual(projection.call_args.args[-1], base)
+                    self.assertEqual(code, b.EXIT_CAP if over else b.EXIT_OK)
+                    self.assertEqual(rc.deleted, [] if over else expected_delete)
+                    self.assertEqual(rc.uploaded, [] if over else [incoming.key])
+                    self.assertEqual(rc.store[self.ARCHIVE_KEY], self.ARCHIVE_BYTES)
+                    self.assertEqual(rc.store["other"], 123)
+                    if not over:
+                        self.assertEqual(sum(rc.store.values()), base + len(self.DATA) - previous)
+
+    def test_root_lookalikes_count_once_without_blocking_retention(self):
+        roots = {prefix.rstrip("/"): i + 1 for i, prefix in enumerate(b.MANAGED_PREFIXES)}
+        old = objs_for([self.now - dt.timedelta(days=i) for i in range(1, 11)], 100)
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        rc = FakeRclone(old + [b.Obj(self.instance(), 30)] +
+                        [b.Obj(key, size) for key, size in roots.items()])
+        bucket_bytes, managed = b.inventory_state(rc)
+        self.assertEqual(bucket_bytes, sum(rc.store.values()))
+        self.assertEqual(sum(o.size for objs in managed.values() for o in objs),
+                         bucket_bytes - sum(roots.values()))
+        for objs in managed.values():
+            self.assertTrue(all(o.key not in roots for o in objs))
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        managed[b.DB_PREFIX].append(b.Obj(b.db_key_for(dump), os.path.getsize(dump)))
+        plans = b.compute_retention(self.cfg, managed, self.now, True)
+        expected = [key for plan in plans.values() for key in plan.delete]
+        self.assertTrue(expected)
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_OK)
+        self.assertEqual(rc.deleted, expected)
+        self.assertTrue(all(key.startswith(b.DELETABLE_PREFIXES) for key in rc.deleted))
+        self.assertEqual({key: rc.store[key] for key in roots}, roots)
+
+    def test_failed_initial_inventory_prevents_upload_and_retention(self):
+        rc = FakeRclone([b.Obj(self.ARCHIVE_KEY, self.ARCHIVE_BYTES)])
+        before = dict(rc.store)
+        with mock.patch.object(rc, "bucket_inventory", side_effect=b.BackupError("inventory failed")):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertEqual(rc.store, before)
+        self.assertEqual((rc.uploaded, rc.deleted, rc.puts), ([], [], {}))
+
+    def test_admission_rechecks_unrelated_growth_during_capture(self):
+        rc = FakeRclone()
+        original = b.build_instance_tar
+
+        def build(*args):
+            rc.store["unrelated/new"] = self.cfg.cap_bytes
+            return original(*args)
+
+        with mock.patch.object(b, "build_instance_tar", side_effect=build):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
+        self.assertEqual((rc.uploaded, rc.deleted, rc.puts), ([], [], {}))
+
+    def test_cap_recovery_rechecks_time_after_inventory(self):
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        key = b.db_key_for(dump)
+        invoked = b.key_timestamp(key) + dt.timedelta(hours=25, minutes=30)
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        self.cfg.cap_bytes = 1000
+        cases = ((900, 900, b.EXIT_CAP, 4), (2700, 2700, b.EXIT_CAP, 0),
+                 (-1, 2700, b.EXIT_ERROR, 0), (7200, 2700, b.EXIT_ERROR, 0))
+        for wall_seconds, tick_seconds, code, deletes in cases:
+            with self.subTest(wall_seconds=wall_seconds, tick_seconds=tick_seconds):
+                self.clock.return_value = invoked
+                ticks = [0]
+                history = objs_for([invoked - dt.timedelta(days=i) for i in range(2, 11)])
+                instance = f"instance/{invoked:%Y/%m/%d}/paperclip-instance-{invoked:%Y%m%d-%H%M%S}.tar.gz"
+                rc = NativeIntegrityRclone(history + [b.Obj(instance, 10),
+                    b.Obj(self.ARCHIVE_KEY, self.ARCHIVE_BYTES)])
+                rc.upload(dump, key)
+                rc.uploaded.clear()
+                original = rc.bucket_inventory
+                calls = 0
+
+                def inventory():
+                    nonlocal calls
+                    calls += 1
+                    if calls == 2:
+                        self.clock.return_value = invoked + dt.timedelta(seconds=wall_seconds)
+                        ticks[0] = tick_seconds
+                    return original()
+
+                with mock.patch.object(rc, "bucket_inventory", side_effect=inventory), \
+                        mock.patch.object(b.snapshots.time, "monotonic", side_effect=lambda: ticks[0]):
+                    self.assertEqual(b.run(self.cfg, rc, invoked), code)
+                self.assertEqual(rc.verified, [key])
+                self.assertEqual(rc.uploaded, [])
+                self.assertEqual(len(rc.deleted), deletes)
+                self.assertEqual(rc.store[self.ARCHIVE_KEY], self.ARCHIVE_BYTES)
+
+    def test_failed_admission_inventory_prevents_data_upload(self):
+        rc = FakeRclone()
+        original = rc.bucket_inventory
+        calls = 0
+
+        def inventory():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise b.BackupError("inventory failed")
+            return original()
+
+        with mock.patch.object(rc, "bucket_inventory", side_effect=inventory):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertEqual((rc.uploaded, rc.deleted), ([], []))
+
+    def test_unsafe_retention_key_never_receives_freed_credit(self):
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        bad = "db/../ops/archive-20261001-000000.bin"
+        old = objs_for([self.now - dt.timedelta(days=i) for i in range(1, 4)], 10)
+        rc = FakeRclone(old + [b.Obj(bad, 10000), b.Obj(self.instance(), 10)])
+        self.cfg.cap_bytes = sum(rc.store.values())
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_CAP)
+        self.assertEqual((rc.uploaded, rc.deleted), ([], []))
+        self.assertEqual(rc.store[bad], 10000)
+
+    def test_pending_key_appearing_during_capture_is_not_overwritten(self):
+        rc = FakeRclone()
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        key = b.db_key_for(dump)
+        original = b.build_instance_tar
+
+        def build(*args):
+            rc.store[key] = 1
+            return original(*args)
+
+        with mock.patch.object(b, "build_instance_tar", side_effect=build):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertEqual((rc.uploaded, rc.deleted), ([], []))
+        self.assertEqual(rc.store[key], 1)
+
+    def test_status_rechecks_unrelated_growth_after_upload(self):
+        rc = FakeRclone([b.Obj(b.STATUS_KEY, 2)])
+        original = rc.verify
+
+        def verify(local, key):
+            original(local, key)
+            rc.store["unrelated/new"] = self.cfg.cap_bytes
+
+        with mock.patch.object(rc, "verify", side_effect=verify):
+            self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_ERROR)
+        self.assertTrue(rc.uploaded)
+        self.assertEqual(rc.store[b.STATUS_KEY], 2)
+        self.assertNotIn(b.STATUS_KEY, rc.puts)
+        self.assertNotIn("unrelated/new", rc.deleted)
+
+    def test_dry_run_counts_archive_without_mutation(self):
+        rc = FakeRclone([b.Obj(self.ARCHIVE_KEY, self.ARCHIVE_BYTES)])
+        before = dict(rc.store)
+        with mock.patch.object(rc, "verify") as verify:
+            self.assertEqual(b.run(self.cfg, rc, self.now, dry_run=True), b.EXIT_CAP)
+        verify.assert_not_called()
+        self.assertEqual(rc.store, before)
+        self.assertEqual((rc.uploaded, rc.deleted, rc.puts), ([], [], {}))
 
 
 class TarIntegrityTests(RunFixture):

@@ -85,6 +85,12 @@ def _int(env: dict, name: str, default: int) -> int:
     return value
 
 
+def validate_bucket(bucket: str) -> None:
+    # A path here would silently inventory only a subtree of the physical bucket.
+    if not isinstance(bucket, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", bucket):
+        raise BackupError("BACKUP_BUCKET must be a bucket name, not a path")
+
+
 @dataclass
 class Config:
     bucket: str
@@ -104,6 +110,9 @@ class Config:
     sources: tuple[snapshots.Source, ...] = ()
     receipt_dir: str = ""
     restore_weekday: int = 6  # Sunday UTC, inside the existing daily timer
+
+    def __post_init__(self):
+        validate_bucket(self.bucket)
 
     def retention_for(self, prefix: str) -> tuple[int, int, int]:
         if prefix == INSTANCE_PREFIX:
@@ -166,6 +175,7 @@ def assert_managed(key: str, prefixes=MANAGED_PREFIXES) -> None:
 
 class Rclone:
     def __init__(self, bucket: str, binary: str = "rclone"):
+        validate_bucket(bucket)
         self.bucket = bucket
         self.binary = binary
 
@@ -196,6 +206,40 @@ class Rclone:
             raise
         items = json.loads(out or "[]")
         return [Obj(prefix + i["Path"], int(i["Size"])) for i in items]
+
+    def bucket_inventory(self) -> list[Obj]:
+        """Read all object bytes for admission, without widening mutation guards.
+
+        A successful recursive listing consumes all backend pages. Unlike an
+        optional managed prefix, a missing bucket or empty response is unknown.
+        Never accept a partial command result or coerce malformed sizes to zero.
+        """
+        # Global rclone options can silently filter an otherwise valid listing.
+        # Allow remote configuration and our binary override, not inherited command
+        # defaults (including future filters). Do not log possibly sensitive values.
+        if any(name.startswith("RCLONE_") and name not in ("RCLONE_CONFIG", "RCLONE_BIN") and
+               not name.startswith("RCLONE_CONFIG_") for name in os.environ):
+            raise BackupError("whole-bucket inventory refuses rclone environment options")
+        out = self._run(["lsjson", "-R", "--files-only", "--no-mimetype",
+                         "--no-modtime", self._target("")])
+        try:
+            items = json.loads(out)
+            if not isinstance(items, list):
+                raise ValueError
+            objects = []
+            seen = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError
+                key, size = item.get("Path"), item.get("Size")
+                if (not isinstance(key, str) or not key or key in seen or
+                        type(size) is not int or size < 0 or item.get("IsDir") is not False):
+                    raise ValueError
+                seen.add(key)
+                objects.append(Obj(key, size))
+            return objects
+        except (ValueError, TypeError):
+            raise BackupError("invalid whole-bucket inventory") from None
 
     def upload(self, local: str, key: str) -> None:
         assert_managed(key)
@@ -458,6 +502,8 @@ def compute_retention(cfg: Config, existing: dict, now: dt.datetime,
     for prefix in DELETABLE_PREFIXES:
         plan = plan_retention(existing[prefix], now, cfg.retention_for(prefix),
                               remaining, upload_ok, prefix)
+        for key in plan.delete:
+            assert_managed(key, (prefix,))
         remaining -= len(plan.delete)
         plans[prefix] = plan
     return plans
@@ -536,6 +582,18 @@ def projected_with_status(status: dict, existing: dict, incoming: list[Obj],
         total = updated
 
 
+def inventory_state(rc) -> tuple[int, dict]:
+    """Keep managed retention inputs, not the full unrelated-object inventory."""
+    existing = {p: [] for p in MANAGED_PREFIXES}
+    bucket_bytes = 0
+    for obj in rc.bucket_inventory():
+        bucket_bytes += obj.size
+        prefix = next((p for p in MANAGED_PREFIXES if obj.key.startswith(p)), None)
+        if prefix is not None:
+            existing[prefix].append(obj)
+    return bucket_bytes, existing
+
+
 def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
     now = now.astimezone(dt.timezone.utc)
     clock_start = snapshots.utc_now() if not dry_run else now
@@ -549,9 +607,10 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
     tmp_root = None
     code = EXIT_ERROR
     try:
-        existing = {p: rc.list(p) for p in MANAGED_PREFIXES}
+        bucket_bytes, existing = inventory_state(rc)
         managed = sum(o.size for objs in existing.values() for o in objs)
         status["managed_bytes"] = managed
+        status["bucket_bytes"] = bucket_bytes
         today = now.date()
 
         # a) pick the database dump and make sure it is recent
@@ -628,14 +687,24 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                 planned.append((tar_path, tar_key))
             incoming_objs = [Obj(k, os.path.getsize(p)) for p, k in planned]
 
-        # Capture/upload may take hours. Freshness and retention use observation
-        # time, not the invocation timestamp retained in the run receipt.
+        # Refresh after capture, immediately before admission. The shared CLI
+        # lock does not reserve capacity against independent external writers.
+        bucket_bytes, existing = inventory_state(rc)
+
+        # Capture and inventory may take hours. Freshness and retention use
+        # observation time after both, not the invocation time in the receipt.
         invoked_at = now
         if not dry_run:
             now = snapshots.utc_now()
             if clock_start < invoked_at:
                 raise BackupError("snapshot clock moved backward since invocation")
             snapshots.check_clock(clock_start, start_tick, now, snapshots.time.monotonic())
+        managed = sum(o.size for objs in existing.values() for o in objs)
+        status["managed_bytes"] = managed
+        status["bucket_bytes"] = bucket_bytes
+        current_keys = {o.key for objs in existing.values() for o in objs}
+        if any(o.key in current_keys for o in incoming_objs):
+            raise BackupError("pending backup key appeared during capture; retry without overwriting")
 
         # c) cap guard against the projected size: current + incoming - planned deletions
         incoming = sum(o.size for o in incoming_objs)
@@ -651,7 +720,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                 freed = sum(sizes[k] for pl in plans.values() for k in pl.delete)
             except BackupError as exc:
                 retention_block = str(exc)
-        projected = managed + incoming - freed
+        projected = bucket_bytes + incoming - freed
         # Dry-run reserves the real receipt too, without publishing it. New
         # instance/supplemental data sizes retain the documented estimates.
         receipt = dict(status, dry_run=False,
@@ -659,7 +728,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         projected = projected_with_status(receipt, existing, incoming_objs, plans, projected)
         status["projected_bytes"] = projected
         if projected > cfg.cap_bytes:
-            status["error"] = (f"cap reached: projected {projected} (managed {managed} + "
+            status["error"] = (f"cap reached: projected {projected} (bucket {bucket_bytes}, managed {managed}; + "
                                f"incoming {incoming} - freed {freed}, including status growth) > cap {cfg.cap_bytes}; "
                                "nothing uploaded")
             log(status["error"])
@@ -730,7 +799,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             # Re-list even on partial upload/delete or failed initial inventory.
             # The shared CLI lock excludes our other backup/drill writers. If the
             # exact replacement cannot be admitted, retain the previous object.
-            objects = [o for prefix in MANAGED_PREFIXES for o in rc.list(prefix)]
+            objects = rc.bucket_inventory()
             if snapshots.status_replacement_bytes(objects, STATUS_KEY, data) > cfg.cap_bytes:
                 raise BackupError("status would exceed aggregate storage cap; previous status retained")
             rc.put_bytes(data, STATUS_KEY)
