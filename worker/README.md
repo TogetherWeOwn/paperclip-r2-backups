@@ -52,7 +52,7 @@ Navigation aliases and recognized SPA fallback HTML select the separately pinned
 fetch, without redirecting the browser URL; `Content-Location` discloses that
 identity. Document fetches also reject redirects, partial/cache responses, wrong
 MIME and changed bytes; HEAD validates the full representation before omitting its
-body. Only static scripts/HTML are buffered; R2 objects remain streams. Static
+body. Only pinned static representations are buffered; R2 objects remain streams. Static
 responses are no-store, including errors. This does not repair already-open or
 cached documents retroactively. HTTPS effective URL origins
 are required outside the non-deploy loopback fixture; forwarded headers are not
@@ -155,8 +155,36 @@ all source/derivative paths, lengths, hashes and deterministic byte operations;
 original `checksums.json`, provenance and all notices remain unchanged. This is
 not a parser update, sanitization fix or clean-SBOM claim. Exact-head Actions must
 qualify semantic email parsing/reopening and the full preview/client matrix.
-Missing PDF annotation imagery remains an explicit unqualified residual; this
-email correction adds no PDF assets or routes and does not waive image checks.
+The email correction adds no PDF renderer changes and does not waive image checks.
+
+`dashboard/pdf-note-v1/` separately retains the original 1,083-byte
+`pdfjs-dist@2.5.207` Note SVG, unchanged Apache-2.0 root LICENSE and pinned
+`provenance.json`. These three files are not additions to either immutable
+inventory and do not establish the compiled PDF renderer's version or security.
+Only authenticated GET/HEAD `/BACKUPS/files/<folder-param>/annotation-note.svg`
+serves it. The root sentinel is `IA==`; other parameters must be canonical padded
+UTF-8 base64 (only alphabet `/` becomes uppercase `%2F`), at most 4,096 serialized
+characters / 1,024 decoded bytes. Relative folders end `/`, with nonempty components,
+no dot components, absolute paths, backslash, percent or ASCII controls. These are
+image-route limits, not changes to the API's opaque object-key contract.
+
+The helper maps every admitted folder to one fixed internal ASSETS path, never R2
+or a folder-selected target. It strips range/conditional headers, requests identity
+encoding and validates full 200 status, SVG MIME, no redirect/Location or encoding,
+EOF, exact length and full SHA256 before success. Storage is bounded to 1,084 bytes,
+with a 10-second absolute read deadline and bounded empty-chunk work. GET returns
+exact bytes; HEAD performs the same validation without a body. Both have clean
+no-store/nosniff headers; no backend cookies, validators, 206 or 304 survive.
+Observable aliases, other annotation/SVG file subresources and the direct public
+`/pdf-note-v1` namespace are 404 without ASSETS/R2 or SPA fallback. Backend failure
+is a fixed non-HTML 500, never a fallback icon/document. API dispatch, normal file
+navigation, existing CSP and object streams stay unchanged. Request URL normalization
+may erase raw dot/backslash forms before the handler; tests record actual Request URLs,
+not fictitious raw-wire rejection. Exact-head Actions must qualify image response
+hashes/lengths/headers and decoded dimensions at root and selected folders, including
+canonical base64-slash, plus missing/corrupt/MIME/redirect/HTML rejection controls.
+This single Note resource does not add CMaps, fonts, real workers, other annotation
+images or a claim of general PDF compatibility; broader PDF/F6/F7 review remains open.
 
 Retained tools are exact: workers-types 5.20261101.1, TypeScript 7.0.2, Wrangler
 4.156.1 and their unchanged locked dependency objects. Use npm **11.19.0** with the

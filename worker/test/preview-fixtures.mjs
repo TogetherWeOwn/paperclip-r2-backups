@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { gzipSync } from "node:zlib";
 import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 
 const folder = "db/qualification/";
 const text = "Unicode café Ω\n<b>preview-marker</b>\nlast-line";
@@ -52,6 +53,9 @@ export function seedPreviews(state) {
   for (const [name, body, contentType] of corpus) {
     state.objects.set(folder + name, { bytes: Buffer.from(body), httpMetadata: { contentType } });
   }
+  for (const prefix of ["", "instance/qualification/", "db/???/"]) {
+    state.objects.set(prefix + "case-pdf.pdf", { bytes: ordinaryPdf(), httpMetadata: { contentType: "application/pdf" } });
+  }
   // The generic adapter mock deliberately does not simulate listing semantics.
   // This UI fixture needs real prefix/delimiter filtering to verify navigation.
   const list = state.bucket.list.bind(state.bucket);
@@ -72,7 +76,29 @@ export function seedPreviews(state) {
   return corpus.map(([name]) => name);
 }
 
-export async function qualifyPreviews(cdp, origin, names, evidence) {
+function acceptAnnotationImages(images, responses, expectedUrl) {
+  assert.ok(images.length > 0, "PDF annotation images observed");
+  for (const image of images) {
+    assert.equal(image.url, expectedUrl, "Unchanged renderer uses the selected same-origin relative URL");
+    assert.equal(image.complete, true);
+    assert.ok(image.width > 0 && image.height > 0, "Every observed PDF annotation image must decode; no missing-icon waiver");
+    const response = responses.findLast(response => response.url === image.url);
+    assert.ok(response, "Every image observation, including duplicates, correlates to a captured full response");
+    assert.equal(response.status, 200);
+    assert.equal(response.mimeType, "image/svg+xml");
+    const headers = new Headers(response.headers);
+    assert.equal(headers.get("content-type"), "image/svg+xml");
+    assert.equal(headers.get("content-length"), "1083");
+    assert.equal(headers.get("x-content-type-options"), "nosniff");
+    assert.equal(headers.get("cache-control"), "no-store");
+    assert.equal(headers.get("location"), null);
+    assert.equal(response.redirects.length, 0);
+    assert.equal(response.bytes, 1083);
+    assert.equal(response.sha256, "f8e7b10e93f771ba1ef3a3c771bcbf59e5a3efe9832bef90baf1dbe9f66e1d07");
+  }
+}
+
+export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageMode) {
   const artifacts = new URL("../artifacts/previews/", import.meta.url);
   await mkdir(artifacts, { recursive: true });
   evidence.previews = [];
@@ -93,9 +119,19 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
     if (result.exceptionDetails) assert.fail(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
     return result.result.value;
   };
-  const url = `${origin}/BACKUPS/files/${encodeURIComponent(Buffer.from(folder).toString("base64"))}`;
-  for (const name of names) {
-    const record = { name, url, status: "unverified" };
+  const cases = [
+    ...names.map(name => ({ name, prefix: folder, mode: "normal", id: name })),
+    ...["", "instance/qualification/", "db/???/"].map((prefix, index) => ({ name: "case-pdf.pdf", prefix, mode: "normal", id: `pdf-folder-${index}` })),
+    ...["missing", "corrupt", "mime", "redirect", "html"].map(mode => ({ name: "case-pdf.pdf", prefix: folder, mode, id: `pdf-control-${mode}` })),
+  ];
+  for (const { name, prefix, mode, id } of cases) {
+    // Match Vue Router's parameter encoder: slash only, not encodeURIComponent's
+    // %3D/%2B aliases. Root is the client's single-space sentinel.
+    const parameter = Buffer.from(prefix || " ").toString("base64").replaceAll("/", "%2F");
+    const url = `${origin}/BACKUPS/files/${parameter}`;
+    setPdfImageMode(mode);
+    const networkStart = evidence.network.length;
+    const record = { name, id, url, mode, status: "unverified" };
     evidence.previews.push(record);
     try {
       const loaded = cdp.event("Page.loadEventFired");
@@ -140,14 +176,26 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
         record.actual.annotationImages = await evaluate(`
           const images = () => [...document.querySelectorAll('#pdfvuer .annotationLayer img')];
           await wait(() => images().length > 0 && images().every(image => image.complete), 'PDF annotation image responses');
-          return images().map(image => ({url:image.src, width:image.naturalWidth, height:image.naturalHeight}));
+          return images().map(image => ({url:image.src, complete:image.complete, width:image.naturalWidth, height:image.naturalHeight}));
         `);
-        assert.ok(record.actual.annotationImages.every(image => image.width > 0 && image.height > 0), "Every observed PDF annotation image must decode; no missing-icon waiver");
-        for (const image of record.actual.annotationImages) {
-          const response = evidence.network.findLast(response => response.url === image.url);
-          assert.ok(response, "Annotation image response was retained");
-          assert.equal(response.status, 200);
-          assert.equal(response.mimeType, "image/svg+xml");
+        const expectedImage = `${origin}/BACKUPS/files/${parameter}/annotation-note.svg`;
+        const responses = evidence.network.slice(networkStart).filter(response => record.actual.annotationImages.some(image => image.url === response.url));
+        record.actual.annotationResponses = [];
+        for (const response of responses) {
+          const body = await cdp.call("Network.getResponseBody", { requestId: response.requestId });
+          // Only the authored annotation subresource is retained, not object bytes.
+          const bytes = Buffer.from(body.body, body.base64Encoded ? "base64" : "utf8");
+          record.actual.annotationResponses.push({ ...response, bytes: bytes.length,
+            sha256: createHash("sha256").update(bytes).digest("hex"),
+            redirects: evidence.redirects.filter(redirect => redirect.requestId === response.requestId) });
+        }
+        const accept = () => acceptAnnotationImages(record.actual.annotationImages, record.actual.annotationResponses, expectedImage);
+        if (mode === "normal") accept();
+        else {
+          assert.ok(record.actual.annotationResponses.length > 0, "Controlled image failure retained its actual network response");
+          assert.ok(record.actual.annotationResponses.every(response => response.status === 500));
+          assert.throws(accept, assert.AssertionError, "The same passing-image helper must reject every backend failure control");
+          record.rejectionControl = true;
         }
       } else if (name.endsWith(".png")) {
         record.actual = await evaluate(`
@@ -229,7 +277,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
       record.error = String(error).slice(0, 4096);
     } finally {
       const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
-      await writeFile(new URL(`${name}.png`, artifacts), Buffer.from(screenshot.data, "base64"));
+      await writeFile(new URL(`${id}.png`, artifacts), Buffer.from(screenshot.data, "base64"));
       record.snapshot = await evaluate(`
         const dialog = document.querySelector('.q-dialog .q-card__section.scroll');
         return {path:location.pathname, text:document.body.innerText.slice(-3000),
@@ -261,6 +309,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
       }
     }
   }
+  setPdfImageMode("normal");
   await writeFile(new URL("results.json", artifacts), JSON.stringify(evidence.previews, null, 2));
   const failed = evidence.previews.filter((record) => record.status !== "pass");
   assert.equal(failed.length, 0, `Every authored click-driven preview must qualify; no silent skip:\n${failed.map(record => `${record.name}: ${record.error}`).join("\n")}`);

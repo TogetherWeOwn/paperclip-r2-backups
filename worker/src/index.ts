@@ -170,6 +170,97 @@ async function matchesAsset(bytes: ArrayBuffer, pin: { bytes: number; hash: stri
   return hash === pin.hash;
 }
 
+const PDF_NOTE_PIN = { bytes: 1083, hash: "f8e7b10e93f771ba1ef3a3c771bcbf59e5a3efe9832bef90baf1dbe9f66e1d07" };
+const PDF_NOTE_PATH = "/pdf-note-v1/annotation-note.svg";
+
+function noteFolder(parameter: string): boolean {
+  if (!parameter || parameter.length > 4096 || !/^(?:[A-Za-z0-9+=]|%2F)+$/.test(parameter)) return false;
+  if (parameter === "IA==") return true; // Shipped client's root sentinel.
+  const base64 = parameter.replaceAll("%2F", "/");
+  if (base64.length > 1368 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)) return false;
+  const decodedLength = base64.length / 4 * 3 - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
+  if (decodedLength < 1 || decodedLength > 1024) return false;
+  try {
+    const binary = atob(base64);
+    if (!binary.length || binary.length > 1024 || btoa(binary) !== base64 || base64.replaceAll("/", "%2F") !== parameter) return false;
+    const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+    const folder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    const encoded = new TextEncoder().encode(folder);
+    if (encoded.length !== bytes.length || encoded.some((byte, i) => byte !== bytes[i])) return false;
+    if (!folder.endsWith("/") || /[\\\\%\u0000-\u001f\u007f]/.test(folder)) return false;
+    return folder.slice(0, -1).split("/").every((part) => part !== "" && part !== "." && part !== "..");
+  } catch {
+    return false;
+  }
+}
+
+// Classification only: decoding can reject a confused resource identity, never
+// select bytes. In particular, %2F inside the folder remains a base64 symbol.
+function noteCandidate(path: string): boolean {
+  const inFiles = /^\/[^/]+\/files(?:\/|$)/i.test(path);
+  let leaf = path.replace(/\/+$/, "").split("/").at(-1) ?? "";
+  if (leaf.length > 4096) return true;
+  for (let pass = 0; pass < 16 && leaf.includes("%"); pass++) {
+    try {
+      const decoded = decodeURIComponent(leaf);
+      if (decoded === leaf) break;
+      leaf = decoded;
+    } catch { return true; }
+  }
+  if (leaf.includes("%")) return true;
+  leaf = leaf.split(/[\\\\/]/).filter(Boolean).at(-1)?.toLowerCase() ?? "";
+  return leaf.startsWith("annotation-") || (inFiles && leaf.endsWith(".svg"));
+}
+
+async function pdfNote(request: Request, env: Env, url: URL): Promise<Response | null> {
+  if (/^\/pdf-note-v1(?:\/|$)/i.test(url.pathname)) return deny(404, "Not found");
+  if (!noteCandidate(url.pathname)) return null;
+  const match = /^\/BACKUPS\/files\/([^/]+)\/annotation-note\.svg$/.exec(url.pathname);
+  // URL.search/hash omit bare delimiters. Validate the full serialized identity.
+  if (!match || request.url !== url.origin + url.pathname || !noteFolder(match[1])) return deny(404, "Not found");
+  const internal = fullAssetRequest(request, url.origin + PDF_NOTE_PATH);
+  internal.headers.set("accept", "image/svg+xml");
+  internal.headers.set("accept-encoding", "identity");
+  let asset: Response;
+  try { asset = await env.ASSETS.fetch(internal); } catch { return failure(500); }
+  const length = asset.headers.get("content-length");
+  if (asset.status !== 200 || asset.headers.has("location") ||
+    (asset.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase() !== "image/svg+xml" ||
+    ![null, "identity"].includes(asset.headers.get("content-encoding")?.trim().toLowerCase() ?? null) ||
+    (length !== null && length !== "1083") || !asset.body) {
+    void asset.body?.cancel().catch(() => {});
+    return failure(500);
+  }
+  const reader = asset.body.getReader();
+  const bytes = new Uint8Array(1084);
+  let size = 0;
+  let eof = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Asset deadline")), 10_000); });
+  try {
+    // Fixed storage, a one-byte overflow sentinel, bounded empty-chunk work and an
+    // absolute deadline. A backend Content-Length never substitutes for EOF/hash.
+    for (let chunks = 0; chunks < 1085; chunks++) {
+      const result = await Promise.race([reader.read(), deadline]);
+      if (result.done) { eof = true; break; }
+      if (result.value.byteLength > bytes.length - size) return failure(500);
+      bytes.set(result.value, size);
+      size += result.value.byteLength;
+      if (size > PDF_NOTE_PIN.bytes) return failure(500);
+    }
+    if (!eof || !await matchesAsset(bytes.slice(0, size).buffer, PDF_NOTE_PIN)) return failure(500);
+    return new Response(request.method === "HEAD" ? null : bytes.slice(0, size), { headers: {
+      "content-type": "image/svg+xml", "content-length": "1083", "cache-control": "no-store", "x-content-type-options": "nosniff",
+    } });
+  } catch {
+    return failure(500);
+  } finally {
+    clearTimeout(timer);
+    if (!eof) void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function selectedDocument(request: Request, env: Env, url: URL): Promise<Response> {
   const asset = await env.ASSETS.fetch(fullAssetRequest(request, url.origin + DOCUMENT_PATH));
   if (asset.status !== 200 || asset.headers.has("location") ||
@@ -261,6 +352,12 @@ const handler = {
     // Worker-first assets stay behind the same Access and method checks as the API.
     if (request.method !== "GET" && request.method !== "HEAD") return deny(405, "Method not allowed");
     try {
+      const note = await pdfNote(request, env, url);
+      if (note) {
+        if (request.method !== "HEAD") return note;
+        void note.body?.cancel().catch(() => {});
+        return new Response(null, note);
+      }
       return await protectedAsset(request, env, url);
     } catch {
       console.error("Backup console assets unavailable");

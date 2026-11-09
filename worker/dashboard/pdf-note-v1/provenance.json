@@ -1,0 +1,39 @@
+{
+  "version": "pdf-note-v1",
+  "source": {
+    "package": "pdfjs-dist",
+    "version": "2.5.207",
+    "url": "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-2.5.207.tgz",
+    "bytes": 5134962,
+    "sha256": "642a362f5390b074cd6f76f2ef6e7c23dd67ab6302d2eca5e082f8d70d4dfba1",
+    "integrity": "sha512-xGDUhnCYPfHy+unMXCLCJtlpZaaZ17Ew3WIL0tnSgKFUZXHAPD49GO9xScyszSsQMoutNDgRb+rfBXIaX/lJbw=="
+  },
+  "asset": {
+    "member": "package/web/images/annotation-note.svg",
+    "path": "pdf-note-v1/annotation-note.svg",
+    "bytes": 1083,
+    "sha256": "f8e7b10e93f771ba1ef3a3c771bcbf59e5a3efe9832bef90baf1dbe9f66e1d07",
+    "mime": "image/svg+xml",
+    "modifications": "none; original CRLF and terminal CRLF retained"
+  },
+  "license": {
+    "spdx": "Apache-2.0",
+    "member": "package/LICENSE",
+    "path": "pdf-note-v1/LICENSE",
+    "bytes": 10351,
+    "sha256": "eb3d7b5485466acbd81f2b496f595ab637d2792e268206b27d99e793bdb67549"
+  },
+  "attribution": {
+    "basis": "Inspected original SVG and package root LICENSE from the dual-integrity-verified artifact; retained source-lock candidate metadata declares Apache-2.0.",
+    "memberNotices": "No copyright, license, attribution or external-reference text in the SVG.",
+    "distributionNotice": "No NOTICE member in this artifact. package/cmaps/LICENSE applies to cmaps, not this image.",
+    "continuity": "Ship the unchanged package root LICENSE alongside this unchanged image. Existing original notices, manifests and separate email derivative remain untouched. No compiled PDF renderer version identity is asserted."
+  },
+  "delivery": {
+    "pathFamily": "/BACKUPS/files/<folder-param>/annotation-note.svg",
+    "rootFolderParam": "IA==",
+    "underlyingAssetPath": "/pdf-note-v1/annotation-note.svg",
+    "publicCanonicalAssetRoute": false,
+    "access": "existing Cloudflare Access JWT verification before dispatch; no-store"
+  }
+}

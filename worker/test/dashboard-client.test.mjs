@@ -147,12 +147,22 @@ test("the exact selected email-constructor derivative exercises all enabled API 
   const routes = [];
   const failures = [];
   let origin;
+  let pdfImageMode = "normal";
   const env = {
     BACKUPS: state.bucket, ACCESS_TEAM_NAME: access.team, ACCESS_AUD: "fixture-aud",
     ASSETS: { async fetch(request) {
       let path = new URL(request.url).pathname.slice(1);
       if (path === "email-constructor-v1/") path += "index.html";
       if (!path || !path.includes(".")) path = "index.html";
+      if (path === "pdf-note-v1/annotation-note.svg") {
+        const bytes = await readFile(new URL(path, root));
+        if (pdfImageMode === "missing") return new Response("Not found", { status: 404 });
+        if (pdfImageMode === "redirect") return Response.redirect(origin + "/index.html");
+        if (pdfImageMode === "html") return new Response(await readFile(new URL("index.html", root)), { headers: { "content-type": "text/html" } });
+        return new Response(pdfImageMode === "corrupt" ? Buffer.from(bytes).fill(32, 0, 1) : bytes, {
+          headers: { "content-type": pdfImageMode === "mime" ? "text/html" : "image/svg+xml" },
+        });
+      }
       if (!Object.hasOwn(manifest.files, path) && !Object.hasOwn(derivative.files, path)) return new Response("Not found", { status: 404 });
       const extension = path.split(".").pop();
       const types = { js: "text/javascript", css: "text/css", html: "text/html", svg: "image/svg+xml", png: "image/png", woff: "font/woff", woff2: "font/woff2", ico: "image/x-icon" };
@@ -164,7 +174,7 @@ test("the exact selected email-constructor derivative exercises all enabled API 
       const request = nodeRequest(incoming, origin, { "cf-access-jwt-assertion": jwt });
       if (incoming.url.startsWith("/api/")) routes.push({ method: request.method, path: new URL(request.url).pathname });
       const response = await worker.fetch(request, env, {});
-      if (response.status >= 400) failures.push({ method: request.method, path: new URL(request.url).pathname, status: response.status });
+      if (response.status >= 400) failures.push({ method: request.method, path: new URL(request.url).pathname, status: response.status, pdfImageMode });
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));
       if (response.body) Readable.fromWeb(response.body).pipe(outgoing);
       else outgoing.end();
@@ -188,6 +198,13 @@ test("the exact selected email-constructor derivative exercises all enabled API 
     await cdp.call("Runtime.enable");
     await cdp.call("Log.enable");
     await cdp.call("Network.enable");
+    await cdp.call("Network.setCacheDisabled", { cacheDisabled: true });
+    browserEvidence.redirects = [];
+    browserEvidence.networkFailures = [];
+    cdp.on("Network.requestWillBeSent", ({ requestId, request, redirectResponse }) => {
+      if (redirectResponse) browserEvidence.redirects.push({ requestId, from: redirectResponse.url, to: request.url, status: redirectResponse.status });
+    });
+    cdp.on("Network.loadingFailed", event => browserEvidence.networkFailures.push(event));
     browserEvidence.version = await cdp.call("Browser.getVersion");
     cdp.on("Network.responseReceived", ({ requestId, response, type }) => browserEvidence.network.push({ requestId, url: response.url, status: response.status, mimeType: response.mimeType, headers: response.headers, type }));
     cdp.on("Log.entryAdded", ({ entry }) => browserEvidence.console.push(entry));
@@ -317,8 +334,13 @@ test("the exact selected email-constructor derivative exercises all enabled API 
     await writeFile(new URL("../artifacts/dashboard-client.json", import.meta.url), JSON.stringify({ dashboardVersion: "1.2.0", routes, failures, result }, null, 2));
     const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
     await writeFile(new URL("../artifacts/dashboard-client.png", import.meta.url), Buffer.from(screenshot.data, "base64"));
-    await qualifyPreviews(cdp, origin, previews, browserEvidence);
-    assert.deepEqual(failures, [], "Click-driven previews must not introduce failed API/static requests");
+    await qualifyPreviews(cdp, origin, previews, browserEvidence, mode => { pdfImageMode = mode; });
+    assert.deepEqual(failures.filter(failure => failure.pdfImageMode === "normal"), [], "Ordinary click-driven previews must not introduce failed API/static requests");
+    for (const failure of failures.filter(failure => failure.pdfImageMode !== "normal")) {
+      assert.ok(["missing", "corrupt", "mime", "redirect", "html"].includes(failure.pdfImageMode));
+      assert.equal(failure.path, "/BACKUPS/files/ZGIvcXVhbGlmaWNhdGlvbi8=/annotation-note.svg");
+      assert.equal(failure.status, 500);
+    }
     assert.deepEqual(browserEvidence.exceptions, [], "Click-driven previews must not introduce application runtime exceptions");
     assert.equal(new TextDecoder().decode(state.objects.get("db/qualification/case-text.txt").bytes), "saved UI marker");
   } finally {

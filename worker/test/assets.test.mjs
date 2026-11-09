@@ -21,7 +21,7 @@ test("immutable dashboard snapshot, supplied spa layout and MIT license remain e
   }
   assert.equal(total, manifest.totalBytes);
   const all = (await readdir(dashboard, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile());
-  assert.equal(all.length, 72); // 56 originals, six evidence files, nine derivatives and one separate manifest.
+  assert.equal(all.length, 75); // 56 originals, six evidence, nine derivatives, one manifest, three separate PDF files.
   for (const [path, hash] of Object.entries({
     "checksums.json": "9d0d73c0c2f4f4be8390c5389e75a4dc4131831460e56d3858bb4609b4303f3d",
     "PROVENANCE.md": "14c74775a834af1842e804dc253ebba7f591e601c556d99132d4326582f5a3b9",
@@ -63,6 +63,39 @@ test("email derivative is exactly the selected constructor and complete module-r
     total += actual.length;
   }
   assert.equal(total, 1_666_162);
+});
+
+test("PDF Note is exactly the separately selected original member, license and provenance, never an inventory rewrite", async () => {
+  const pins = {
+    "annotation-note.svg": [1083, "f8e7b10e93f771ba1ef3a3c771bcbf59e5a3efe9832bef90baf1dbe9f66e1d07"],
+    "LICENSE": [10351, "eb3d7b5485466acbd81f2b496f595ab637d2792e268206b27d99e793bdb67549"],
+    "provenance.json": [1891, "d68f82d437c1be33585f8c8d9aa1cdbebaa61bca8304fe0f65d881f1c65b6f8a"],
+  };
+  const directory = new URL("pdf-note-v1/", dashboard);
+  assert.deepEqual((await readdir(directory)).sort(), Object.keys(pins).sort());
+  for (const [name, [length, hash]] of Object.entries(pins)) {
+    const body = await readFile(new URL(name, directory));
+    assert.equal(body.length, length); assert.equal(digest(body), hash);
+  }
+  const source = JSON.parse(await readFile(new URL("provenance.json", directory)));
+  assert.equal(source.source.url, "https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-2.5.207.tgz");
+  assert.equal(source.source.bytes, 5134962);
+  assert.equal(source.source.sha256, "642a362f5390b074cd6f76f2ef6e7c23dd67ab6302d2eca5e082f8d70d4dfba1");
+  assert.equal(source.source.integrity, "sha512-xGDUhnCYPfHy+unMXCLCJtlpZaaZ17Ew3WIL0tnSgKFUZXHAPD49GO9xScyszSsQMoutNDgRb+rfBXIaX/lJbw==");
+  assert.equal(source.asset.member, "package/web/images/annotation-note.svg");
+  assert.equal(source.asset.path, "pdf-note-v1/annotation-note.svg");
+  assert.equal(source.asset.bytes, pins["annotation-note.svg"][0]);
+  assert.equal(source.asset.sha256, pins["annotation-note.svg"][1]);
+  assert.equal(source.asset.mime, "image/svg+xml");
+  assert.equal(source.license.member, "package/LICENSE");
+  assert.equal(source.license.spdx, "Apache-2.0");
+  assert.equal(source.license.path, "pdf-note-v1/LICENSE");
+  assert.equal(source.license.bytes, pins.LICENSE[0]);
+  assert.equal(source.license.sha256, pins.LICENSE[1]);
+  assert.equal(source.delivery.pathFamily, "/BACKUPS/files/<folder-param>/annotation-note.svg");
+  assert.equal(source.delivery.underlyingAssetPath, "/pdf-note-v1/annotation-note.svg");
+  assert.equal(source.delivery.rootFolderParam, "IA==");
+  assert.equal(source.delivery.publicCanonicalAssetRoute, false);
 });
 
 test("source-candidate notices and exact original font attribution remain pinned", async () => {
