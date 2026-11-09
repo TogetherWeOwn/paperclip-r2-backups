@@ -14,6 +14,7 @@ import { mockBucket, signedAccess, nodeRequest } from "./fixtures.mjs";
 import { seedPreviews, seedMediaPreviews, qualifyPreviews } from "./preview-fixtures.mjs";
 import { seedFullEmails, qualifyFullEmails } from "./email-fixtures.mjs";
 import { seedListing, qualifyListing } from "./listing-fixtures.mjs";
+import { seedWriteUi, qualifyWriteUi } from "./write-ui-fixtures.mjs";
 
 const root = new URL("../dashboard/", import.meta.url);
 
@@ -168,6 +169,7 @@ test("the exact selected layout derivative exercises all enabled API contracts a
   const state = mockBucket();
   const previews = await seedPreviews(state);
   const listingPages = seedListing(state);
+  seedWriteUi(state);
   seedFullEmails(state);
   state.objects.set(".hidden", { bytes: new TextEncoder().encode("hidden") });
   const manifest = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
@@ -390,6 +392,7 @@ test("the exact selected layout derivative exercises all enabled API contracts a
     await qualifyPreviews(cdp, origin, previews, browserEvidence, mode => { pdfImageMode = mode; });
     await qualifyFullEmails(cdp, origin, browserEvidence);
     await qualifyListing(cdp, origin, browserEvidence, listingPages);
+    await qualifyWriteUi(cdp, origin, browserEvidence, state);
     assert.deepEqual(state.calls.filter(([operation, key]) => ["put", "delete", "create", "resume"].includes(operation) && key.startsWith(".r2-explorer/")), [], "Read-only stored-email qualification must not write the unmanaged hidden prefix");
     assert.deepEqual(failures.filter(failure => failure.pdfImageMode === "normal"), [], "Ordinary click-driven previews must not introduce failed API/static requests");
     for (const failure of failures.filter(failure => failure.pdfImageMode !== "normal")) {
