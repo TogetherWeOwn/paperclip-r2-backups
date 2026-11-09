@@ -96,6 +96,32 @@ test("read bookkeeping is independent of chunk count", async () => {
   } finally { race.mock.restore(); }
 });
 
+test("reader storage grows with actual bytes and returns an exact-size buffer", async () => {
+  const NativeUint8Array = Uint8Array;
+  const allocations = [];
+  const small = streamRequest([bytes("{}")], { "content-length": "1" });
+  const chunks = [new NativeUint8Array(1024), new NativeUint8Array(1025), new NativeUint8Array(4096)];
+  const growing = streamRequest(chunks);
+  const allocation = mock.method(globalThis, "Uint8Array", new Proxy(NativeUint8Array, {
+    construct(target, args) {
+      if (typeof args[0] === "number") allocations.push(args[0]);
+      return Reflect.construct(target, args);
+    },
+  }));
+  try {
+    const result = await readControl(small);
+    assert.equal(result.buffer.byteLength, 2, "small replay must not retain the body budget");
+    assert.ok(allocations.every((size) => size <= 1024), "small controls must not reserve the body budget");
+    allocations.length = 0;
+    const grown = await readControl(growing, { bytes: 8192, milliseconds: 100 });
+    assert.equal(grown.byteLength, 6145);
+    assert.equal(grown.buffer.byteLength, 6145);
+    assert.deepEqual(grown, new NativeUint8Array(6145));
+    assert.ok(allocations.length <= 4, "growth must not retain bookkeeping per chunk");
+    assert.ok(allocations.every((size) => size <= 8192));
+  } finally { allocation.mock.restore(); }
+});
+
 test("absolute read deadline also covers a finite sequence of empty chunks", async () => {
   const req = streamRequest(Array.from({ length: 32 }, () => new Uint8Array()));
   let now = 0;

@@ -83,7 +83,7 @@ export function checkQuery(url: ControlUrl): void {
   }
 }
 
-/** Fixed storage: network chunk count does not become retained bookkeeping. */
+/** Geometric storage: network chunk count does not become retained bookkeeping. */
 export async function readControl(
   request: Request,
   limits: { bytes: number; milliseconds: number } = CONTROL_LIMITS,
@@ -105,7 +105,7 @@ export async function readControl(
   }
   if (!request.body) invalid();
   const reader = request.body.getReader();
-  const storage = new Uint8Array(limits.bytes);
+  let storage = new Uint8Array(Math.min(limits.bytes, 1024));
   let used = 0;
   let complete = false;
   let interrupted: ControlError | undefined;
@@ -127,9 +127,14 @@ export async function readControl(
       if (interrupted) throw interrupted;
       if (done) {
         complete = true;
-        return storage.subarray(0, used);
+        return used === storage.byteLength ? storage : storage.slice(0, used);
       }
       if (value.byteLength > limits.bytes - used) throw new ControlError(413);
+      if (used + value.byteLength > storage.byteLength) {
+        const grown = new Uint8Array(Math.min(limits.bytes, Math.max(storage.byteLength * 2, used + value.byteLength)));
+        grown.set(storage.subarray(0, used));
+        storage = grown;
+      }
       storage.set(value, used);
       used += value.byteLength;
     }

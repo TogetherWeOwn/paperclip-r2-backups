@@ -36,13 +36,17 @@ The config contains no routes, domains or account ids.
 
 ```bash
 cd worker
-# CI performs the clean install, typecheck, fixtures and dry-run build.
+# CI performs typecheck, fixtures and the dry-run build.
+# Use Node 24 / npm 11.19+ with the native policy below before installing.
+test "$(npm config get min-release-age)" = 3
+test "$(npm config get ignore-scripts)" = true
+npm ci --no-audit --no-fund
 # A production deployment requires separate release approval and qualification.
-# Access settings (see below), then:
-npx wrangler login                        # or export CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
-npx wrangler deploy
-printf '%s' '<TEAM_NAME>' | npx wrangler secret put ACCESS_TEAM_NAME
-printf '%s' '<AUD_TAG>'   | npx wrangler secret put ACCESS_AUD
+# Access settings (see below), then use only the installed, locked CLI:
+./node_modules/.bin/wrangler login         # or export CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
+./node_modules/.bin/wrangler deploy
+printf '%s' '<TEAM_NAME>' | ./node_modules/.bin/wrangler secret put ACCESS_TEAM_NAME
+printf '%s' '<AUD_TAG>'   | ./node_modules/.bin/wrangler secret put ACCESS_AUD
 ```
 
 Then attach a custom domain to the Worker (dashboard: Worker, Settings, Domains and Routes,
