@@ -34,9 +34,11 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
           const timer = setTimeout(() => { finish(); reject(new Error(label + ': ' + document.body.innerText.slice(-1500))); }, 10000);
           check();
         });
+        const control = (selector, label) => [...document.querySelectorAll(selector)].find(el =>
+          el.getBoundingClientRect().width > 0 && !el.disabled &&
+          el.innerText.trim().toLowerCase().endsWith(label.toLowerCase()));
         const click = (selector, label) => {
-          const element = [...document.querySelectorAll(selector)].find(el => el.getBoundingClientRect().width > 0 &&
-            el.innerText.trim().toLowerCase().endsWith(label.toLowerCase()));
+          const element = control(selector, label);
           if (!element) throw new Error('Missing pinned control: ' + label);
           element.click();
         };
@@ -47,7 +49,11 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     return result.result.value;
   };
   const snapshot = async (step) => {
-    record.steps.push({ step, names: await evaluate("return names();"), mutations: mutations() });
+    record.steps.push({ step, names: await evaluate("return names();"), mutations: mutations(),
+      dialog: await evaluate(`return [...document.querySelectorAll('.q-dialog .q-card')].map(card => ({
+        text: card.textContent.slice(0, 2048), buttons: [...card.querySelectorAll('button')].map(button => ({
+          text: button.textContent, visibleText: button.innerText, disabled: button.disabled,
+          width: button.getBoundingClientRect().width })) }));`) });
     const { data } = await cdp.call("Page.captureScreenshot", { format: "png" });
     await writeFile(new URL(`${step}.png`, artifacts), Buffer.from(data, "base64"));
   };
@@ -58,7 +64,7 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
       await wait(() => document.querySelector('.q-menu .q-item'), 'File menu');
       click('.q-menu .q-item', ${JSON.stringify(action)});`);
   };
-  const dialog = async (action) => evaluate(`await wait(() => document.querySelector('.q-dialog .q-card'), 'Write dialog');
+  const dialog = async (action) => evaluate(`await wait(() => control('.q-dialog button', ${JSON.stringify(action)}), 'Write dialog control');
     click('.q-dialog button', ${JSON.stringify(action)});`);
   const closed = async () => evaluate("await wait(() => !document.querySelector('.q-dialog'), 'Closed write dialog');");
   const names = async (expected) => {
