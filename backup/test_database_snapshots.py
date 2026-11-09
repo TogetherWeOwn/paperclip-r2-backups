@@ -131,7 +131,10 @@ class SnapshotTests(unittest.TestCase):
                        receipt_dir=self.root, sources=())
         self.assertEqual(s.drill(cfg, store, NOW), 1)
         store.put_bytes.assert_not_called()
-        receipt_path = os.path.join(self.root, "restore-20261108-042000.json")
+        receipts = [name for name in os.listdir(self.root)
+                    if name.startswith("restore-") and name.endswith(".json")]
+        self.assertEqual(len(receipts), 1)
+        receipt_path = os.path.join(self.root, receipts[0])
         with open(receipt_path) as stream:
             self.assertFalse(json.load(stream)["ok"])
 
@@ -154,6 +157,55 @@ class SnapshotTests(unittest.TestCase):
                 self.assertEqual(store.store["other"], 123)
                 self.assertEqual(store.store[key], length if spare == 0 else 2)
                 self.assertEqual(store.deleted, [])
+
+    def test_same_second_failed_drills_preserve_private_distinct_receipts(self):
+        for failure in ("missing", "redacted", "admission"):
+            with self.subTest(failure=failure):
+                receipts = os.path.join(self.root, failure)
+                error = ("restore drill failed; inspect protected operator diagnostics"
+                         if failure == "redacted" else
+                         "restore receipt storage admission failed; local evidence retained"
+                         if failure == "admission" else
+                         "paperclip: no offsite snapshot with substantiated timing")
+                receipt = {"timestamp": "2026-11-08T04:20:00Z", "ok": False,
+                           "databases": {}, "error": error}
+                data = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
+                cfg = b.Config("fixture", "", "", tmp_dir=self.root, receipt_dir=receipts,
+                               cap_bytes=1 if failure == "admission" else len(data),
+                               sources=(source("paperclip"), source("hindsight")))
+                saved = {}
+                old_umask = os.umask(0)
+                try:
+                    for invocation in range(2):
+                        store = mock.Mock()
+                        store.list.return_value = []
+                        store.bucket_inventory.return_value = []
+                        if failure == "redacted":
+                            store.list.side_effect = [RuntimeError("SECRET signed URL"),
+                                                      [], [], [], [], []]
+                        self.assertEqual(s.drill(cfg, store, NOW), 1)
+                        paths = os.listdir(receipts)
+                        self.assertEqual(len(paths), invocation + 1)
+                        for name in paths:
+                            path = os.path.join(receipts, name)
+                            with open(path, "rb") as stream:
+                                actual = stream.read()
+                            self.assertEqual(json.loads(actual), receipt)
+                            self.assertEqual(actual, saved.get(name, data))
+                            saved[name] = actual
+                        if failure == "admission":
+                            store.put_bytes.assert_not_called()
+                        else:
+                            # Admit at exactly the serialized byte cap, without a
+                            # local filename leaking into the remote key/payload.
+                            store.put_bytes.assert_called_once_with(data, "status/restore-last.json")
+                    self.assertEqual(os.stat(receipts).st_mode & 0o777, 0o700)
+                    for name in saved:
+                        self.assertTrue(name.startswith("restore-20261108-042000-"))
+                        self.assertTrue(name.endswith(".json"))
+                        self.assertEqual(os.stat(os.path.join(receipts, name)).st_mode & 0o777, 0o600)
+                finally:
+                    os.umask(old_umask)
 
     def test_corrupt_dump_hash_fails_closed(self):
         path, _ = self.bundle()
@@ -267,7 +319,14 @@ class SnapshotTests(unittest.TestCase):
                        sources=(source("paperclip"), source("hindsight")))
         with mock.patch.object(s, "restore_and_compare", return_value=expected()):
             self.assertEqual(s.drill(cfg, store, NOW), 0)
-        receipt = json.loads(store.put_bytes.call_args.args[0])
+        data, key = store.put_bytes.call_args.args
+        self.assertEqual(key, "status/restore-last.json")
+        receipts = [name for name in os.listdir(self.root)
+                    if name.startswith("restore-") and name.endswith(".json")]
+        self.assertEqual(len(receipts), 1)
+        with open(os.path.join(self.root, receipts[0]), "rb") as stream:
+            self.assertEqual(stream.read(), data)
+        receipt = json.loads(data)
         self.assertTrue(receipt["ok"])
         self.assertEqual(set(receipt["databases"]), {"paperclip", "hindsight"})
         self.assertEqual(store.download.call_count, 2)
