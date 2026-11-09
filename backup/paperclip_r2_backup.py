@@ -197,6 +197,34 @@ class Rclone:
         items = json.loads(out or "[]")
         return [Obj(prefix + i["Path"], int(i["Size"])) for i in items]
 
+    def bucket_inventory(self) -> list[Obj]:
+        """Read all object bytes for admission, without widening mutation guards.
+
+        A successful recursive listing consumes all backend pages. Unlike an
+        optional managed prefix, a missing bucket or empty response is unknown.
+        Never accept a partial command result or coerce malformed sizes to zero.
+        """
+        out = self._run(["lsjson", "-R", "--files-only", "--no-mimetype",
+                         "--no-modtime", self._target("")])
+        try:
+            items = json.loads(out)
+            if not isinstance(items, list):
+                raise ValueError
+            objects = []
+            seen = set()
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError
+                key, size = item.get("Path"), item.get("Size")
+                if (not isinstance(key, str) or not key or key in seen or
+                        type(size) is not int or size < 0 or item.get("IsDir") is not False):
+                    raise ValueError
+                seen.add(key)
+                objects.append(Obj(key, size))
+            return objects
+        except (ValueError, TypeError):
+            raise BackupError("invalid whole-bucket inventory") from None
+
     def upload(self, local: str, key: str) -> None:
         assert_managed(key)
         self._run(["copyto", local, self._target(key)])
@@ -549,9 +577,12 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
     tmp_root = None
     code = EXIT_ERROR
     try:
-        existing = {p: rc.list(p) for p in MANAGED_PREFIXES}
+        objects = rc.bucket_inventory()
+        bucket_bytes = sum(o.size for o in objects)
+        existing = {p: [o for o in objects if o.key.startswith(p)] for p in MANAGED_PREFIXES}
         managed = sum(o.size for objs in existing.values() for o in objs)
         status["managed_bytes"] = managed
+        status["bucket_bytes"] = bucket_bytes
         today = now.date()
 
         # a) pick the database dump and make sure it is recent
@@ -651,7 +682,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
                 freed = sum(sizes[k] for pl in plans.values() for k in pl.delete)
             except BackupError as exc:
                 retention_block = str(exc)
-        projected = managed + incoming - freed
+        projected = bucket_bytes + incoming - freed
         # Dry-run reserves the real receipt too, without publishing it. New
         # instance/supplemental data sizes retain the documented estimates.
         receipt = dict(status, dry_run=False,
@@ -659,7 +690,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         projected = projected_with_status(receipt, existing, incoming_objs, plans, projected)
         status["projected_bytes"] = projected
         if projected > cfg.cap_bytes:
-            status["error"] = (f"cap reached: projected {projected} (managed {managed} + "
+            status["error"] = (f"cap reached: projected {projected} (bucket {bucket_bytes}, managed {managed}; + "
                                f"incoming {incoming} - freed {freed}, including status growth) > cap {cfg.cap_bytes}; "
                                "nothing uploaded")
             log(status["error"])
@@ -730,7 +761,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             # Re-list even on partial upload/delete or failed initial inventory.
             # The shared CLI lock excludes our other backup/drill writers. If the
             # exact replacement cannot be admitted, retain the previous object.
-            objects = [o for prefix in MANAGED_PREFIXES for o in rc.list(prefix)]
+            objects = rc.bucket_inventory()
             if snapshots.status_replacement_bytes(objects, STATUS_KEY, data) > cfg.cap_bytes:
                 raise BackupError("status would exceed aggregate storage cap; previous status retained")
             rc.put_bytes(data, STATUS_KEY)

@@ -454,7 +454,7 @@ def restore_and_compare(source, dump, manifest):
 
 
 def status_replacement_bytes(objects, key, data):
-    """Aggregate managed bytes after replacing one status object."""
+    """Aggregate inventoried bytes after replacing one status object."""
     previous = sum(obj.size for obj in objects if obj.key == key)
     return sum(obj.size for obj in objects) + len(data) - previous
 
@@ -512,8 +512,7 @@ def drill(cfg, rc, now):
     try:
         # The shared CLI lock excludes backup retention/uploads. Admit the exact
         # replacement delta, including status objects, also for standalone drills.
-        objects = [obj for prefix in ("db/", "instance/", *PREFIXES, "status/")
-                   for obj in rc.list(prefix)]
+        objects = rc.bucket_inventory()
         if status_replacement_bytes(objects, "status/restore-last.json", data) > cfg.cap_bytes:
             raise SnapshotError("restore receipt would exceed aggregate storage cap")
     except Exception:

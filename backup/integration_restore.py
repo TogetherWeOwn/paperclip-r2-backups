@@ -66,6 +66,9 @@ INSERT INTO "a.b".c VALUES (1), (2);
                             result.append(b.Obj(key, os.path.getsize(path)))
                 return result
 
+            def bucket_inventory(self):
+                return self.list("")
+
             def upload(self, local, key):
                 dest = os.path.join(store_dir, key)
                 os.makedirs(os.path.dirname(dest), exist_ok=True)

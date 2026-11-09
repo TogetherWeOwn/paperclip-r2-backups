@@ -126,7 +126,7 @@ class SnapshotTests(unittest.TestCase):
 
     def test_receipt_publication_respects_cap_and_keeps_local_failure(self):
         store = mock.Mock()
-        store.list.side_effect = lambda prefix: [b.Obj(prefix + "existing", 1)]
+        store.bucket_inventory.return_value = [b.Obj("ops/archive", 39426312374)]
         cfg = b.Config("fixture", "", "", cap_bytes=1, tmp_dir=self.root,
                        receipt_dir=self.root, sources=())
         self.assertEqual(s.drill(cfg, store, NOW), 1)
@@ -134,6 +134,26 @@ class SnapshotTests(unittest.TestCase):
         receipt_path = os.path.join(self.root, "restore-20261108-042000.json")
         with open(receipt_path) as stream:
             self.assertFalse(json.load(stream)["ok"])
+
+    def test_restore_receipt_whole_bucket_boundary_and_inventory_failure(self):
+        archive = b.Obj("ops/archive", 39426312374)
+        key = "status/restore-last.json"
+        receipt = {"timestamp": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"), "ok": False,
+                   "databases": {}, "error": "restore drill requires both database sources"}
+        length = len((json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode())
+        for spare in (0, -1, None):
+            with self.subTest(spare=spare), tempfile.TemporaryDirectory(dir=self.root) as dest:
+                store = FakeRclone([archive, b.Obj("other", 123), b.Obj(key, 2)])
+                cfg = b.Config("fixture", "", "", cap_bytes=archive.size + 123 + length + (spare or 0),
+                               tmp_dir=dest, receipt_dir=dest, sources=())
+                if spare is None:
+                    store.bucket_inventory = mock.Mock(side_effect=b.BackupError("inventory failed"))
+                self.assertEqual(s.drill(cfg, store, NOW), 1)
+                self.assertEqual(key in store.puts, spare == 0)
+                self.assertEqual(store.store[archive.key], archive.size)
+                self.assertEqual(store.store["other"], 123)
+                self.assertEqual(store.store[key], length if spare == 0 else 2)
+                self.assertEqual(store.deleted, [])
 
     def test_corrupt_dump_hash_fails_closed(self):
         path, _ = self.bundle()
@@ -241,6 +261,7 @@ class SnapshotTests(unittest.TestCase):
             b.Obj(paths[prefix[:-1]][1], os.path.getsize(paths[prefix[:-1]][0])),
             b.Obj(f"{prefix}2026/02/30/{prefix[:-1]}-20260230-042000-snapshot.tar", 1)]
             if prefix[:-1] in paths else [])
+        store.bucket_inventory.return_value = [obj for prefix in s.PREFIXES for obj in store.list(prefix)]
         store.download.side_effect = lambda key, dest, limit: shutil.copyfile(paths[key.split('/')[0]][0], dest)
         cfg = b.Config("fixture", "", "", tmp_dir=self.root, receipt_dir=self.root,
                        sources=(source("paperclip"), source("hindsight")))
@@ -258,6 +279,7 @@ class SnapshotTests(unittest.TestCase):
         for age in (dt.timedelta(hours=26), dt.timedelta(hours=1)):
             store = mock.Mock()
             store.list.return_value = [b.Obj(key, os.path.getsize(path))]
+            store.bucket_inventory.return_value = store.list.return_value
             store.download.side_effect = RuntimeError("SECRET signed URL")
             cfg = b.Config("fixture", "", "", tmp_dir=self.root, receipt_dir=self.root,
                            sources=(source("hindsight"), source("paperclip")))
