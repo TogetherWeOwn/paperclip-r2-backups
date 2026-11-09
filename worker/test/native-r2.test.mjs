@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { Miniflare } from "miniflare";
+import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { encode } from "./fixtures.mjs";
 
 // Existing exact Wrangler tool dependencies only; no test/runtime package addition.
@@ -28,7 +28,8 @@ async function runtime() {
     },
     bundle: true, write: false, format: "esm", platform: "browser", target: "es2022",
   });
-  const instance = new Miniflare({ modules: true, script: result.outputFiles[0].text, compatibilityDate: "2026-11-01", r2Buckets: ["BACKUPS"], r2Persist: false });
+  // The pinned v5 runtime exports its v4 converter; omitted persistence uses its temporary directory.
+  const instance = new Miniflare(convertV4MiniflareOptions({ modules: true, script: result.outputFiles[0].text, compatibilityDate: "2026-11-01", r2Buckets: ["BACKUPS"] }));
   return instance;
 }
 
