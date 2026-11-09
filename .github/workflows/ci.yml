@@ -70,10 +70,51 @@ jobs:
           path: artifacts/*.json
           retention-days: 14
           if-no-files-found: warn
+  worker:
+    name: Worker adapter and pinned client
+    needs: changes
+    if: needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).worker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: worker
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.21.0'
+      - name: Require the reviewed native manager and project policy
+        run: |
+          test "$(npm --version)" = '11.19.0'
+          test "$(npm config get min-release-age)" = '3'
+          test "$(npm config get ignore-scripts)" = 'true'
+      - name: Clean install with release-age policy and hooks refused
+        run: npm ci --no-audit --no-fund
+      - name: Verify native locked graph without resolution
+        run: npm ls --package-lock-only --all
+      - name: Typecheck the Worker
+        run: npm run typecheck
+      - name: Finite-work, native R2, policy and real pinned-dashboard fixtures
+        run: npm test
+      - name: Non-deploy Worker bundle
+        run: npm run build
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: worker-adapter-client-evidence
+          path: worker/artifacts/*
+          retention-days: 14
+          if-no-files-found: warn
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, security, unit, restore-fixtures]
+    needs: [changes, security, unit, restore-fixtures, worker]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

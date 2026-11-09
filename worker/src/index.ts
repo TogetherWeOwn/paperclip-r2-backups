@@ -1,4 +1,4 @@
-import { R2Explorer } from "r2-explorer";
+import { consoleApi, failure } from "./console-api.ts";
 
 interface Env {
   ASSETS: Fetcher;
@@ -58,6 +58,7 @@ async function verifyAccessJwt(token: string, team: string, aud: string): Promis
   try {
     header = b64urlToJson(parts[0]);
     payload = b64urlToJson(parts[1]);
+    if (!header || !payload || Array.isArray(header) || Array.isArray(payload)) return "malformed token";
   } catch {
     return "undecodable token";
   }
@@ -71,17 +72,23 @@ async function verifyAccessJwt(token: string, team: string, aud: string): Promis
   }
   if (!key) return "unknown signing key";
 
+  let signature: Uint8Array;
+  try {
+    signature = b64urlToBytes(parts[2]);
+  } catch {
+    return "bad signature";
+  }
   const ok = await crypto.subtle.verify(
     { name: "RSASSA-PKCS1-v1_5" },
     key,
-    b64urlToBytes(parts[2]),
+    signature,
     new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
   );
   if (!ok) return "bad signature";
 
   const nowS = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp !== "number" || payload.exp + CLOCK_SKEW_S <= nowS) return "expired";
-  if (typeof payload.nbf === "number" && payload.nbf - CLOCK_SKEW_S > nowS) return "not yet valid";
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp) || payload.exp + CLOCK_SKEW_S <= nowS) return "expired";
+  if (payload.nbf !== undefined && (typeof payload.nbf !== "number" || !Number.isFinite(payload.nbf) || payload.nbf - CLOCK_SKEW_S > nowS)) return "not yet valid";
   if (payload.iss !== `https://${team}.cloudflareaccess.com`) return "wrong issuer";
   const audClaim = payload.aud;
   const audOk = Array.isArray(audClaim) ? audClaim.includes(aud) : audClaim === aud;
@@ -91,55 +98,6 @@ async function verifyAccessJwt(token: string, team: string, aud: string): Promis
 
 const deny = (status: number, msg: string) =>
   new Response(msg, { status, headers: { "cache-control": "no-store", "content-type": "text/plain" } });
-
-const fromB64 = (s: string | null | undefined): string | null => {
-  if (!s) return null;
-  try {
-    return decodeURIComponent(escape(atob(s)));
-  } catch {
-    return null;
-  }
-};
-
-/**
- * Keys a request would modify, derived from R2-Explorer's write endpoints.
- * Returns null for non-write requests, [] for a write we cannot attribute (denied).
- */
-async function writeTargets(req: Request, url: URL): Promise<string[] | null> {
-  if (req.method !== "POST" && req.method !== "PUT" && req.method !== "DELETE") return null;
-  const m = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/);
-  if (!m) return null;
-  const rest = m[1];
-  if (rest === "upload" || rest === "multipart/create" || rest === "multipart/upload") {
-    const k = fromB64(url.searchParams.get("key"));
-    return k === null ? [] : [k];
-  }
-  if (["move", "copy", "folder", "delete", "multipart/complete"].includes(rest)) {
-    let body: Record<string, string>;
-    try {
-      body = (await req.clone().json()) as Record<string, string>;
-    } catch {
-      return [];
-    }
-    const fields = ["key", "oldKey", "newKey", "sourceKey", "destinationKey"];
-    // A copy only reads the source; every other field is modified.
-    const keys = fields
-      .filter((f) => f in body && !(rest === "copy" && f === "sourceKey"))
-      .map((f) => fromB64(body[f]));
-    return keys.some((k) => k === null) || keys.length === 0 ? [] : (keys as string[]);
-  }
-  // POST /api/buckets/:bucket/:key  (metadata edit)
-  if (req.method === "POST" && !rest.includes("/")) {
-    let k: string | null;
-    try {
-      k = fromB64(decodeURIComponent(rest));
-    } catch {
-      k = null;
-    }
-    return k === null ? [] : [k];
-  }
-  return [];
-}
 
 const JSON_WRITE_ROUTES = ["move", "copy", "folder", "delete", "multipart/complete"];
 
@@ -160,19 +118,11 @@ function csrfError(req: Request, url: URL): string | null {
   }
   const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/)?.[1];
   const jsonRoute = rest !== undefined && (JSON_WRITE_ROUTES.includes(rest) || (!rest.includes("/") && rest !== "upload"));
-  if (jsonRoute && !(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
+  if (jsonRoute && (req.headers.get("content-type") ?? "").split(";", 1)[0].trim().toLowerCase() !== "application/json") {
     return "JSON content type required";
   }
   return null;
 }
-
-const explorer = R2Explorer({
-  readonly: false,
-  // Not using cfAccessTeamName: R2-Explorer's built-in check only covers /api/*,
-  // does not verify the AUD, and needs the team name at build time. The wrapper
-  // below validates every request instead.
-  showHiddenFiles: false,
-});
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -185,8 +135,8 @@ export default {
     let err: string | null;
     try {
       err = await verifyAccessJwt(token.trim(), team, aud);
-    } catch (e) {
-      console.error("access verification error", (e as Error).message);
+    } catch {
+      console.error("Access verification unavailable");
       return deny(503, "Access verification unavailable");
     }
     if (err) return deny(403, `Invalid Cloudflare Access token: ${err}`);
@@ -211,23 +161,17 @@ export default {
       .split(",")
       .map((p) => p.trim())
       .filter(Boolean);
-    if (!allowed.includes("*")) {
-      const targets = await writeTargets(request, url);
-      if (targets !== null) {
-        if (targets.length === 0) return deny(403, "Write target could not be determined");
-        const bad = targets.find((k) => !allowed.some((p) => k.startsWith(p)));
-        if (bad !== undefined) return deny(403, `Writes outside managed prefixes (${allowed.join(", ")}) are blocked`);
-      }
+    if (url.pathname === "/api" || url.pathname.startsWith("/api/")) {
+      return consoleApi(request, env, allowed);
     }
 
-    // R2-Explorer 1.2.0 never serves its dashboard itself (its "/" handler returns 500 and
-    // "*" 404s for any path containing a dot). With run_worker_first the asset layer is
-    // skipped, so serve static files here, after the checks above.
-    if (!url.pathname.startsWith("/api/")) {
-      if (request.method !== "GET" && request.method !== "HEAD") return deny(405, "Method not allowed");
-      return env.ASSETS.fetch(request);
+    // Worker-first assets stay behind the same Access and method checks as the API.
+    if (request.method !== "GET" && request.method !== "HEAD") return deny(405, "Method not allowed");
+    try {
+      return await env.ASSETS.fetch(request);
+    } catch {
+      console.error("Backup console assets unavailable");
+      return failure(500);
     }
-
-    return explorer.fetch(request, env, ctx);
   },
 };
