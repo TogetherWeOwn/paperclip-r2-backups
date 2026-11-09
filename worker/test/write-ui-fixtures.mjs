@@ -75,10 +75,22 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
       await wait(() => document.querySelector('.q-menu .q-item'), 'File menu');
       click('.q-menu .q-item', values[1]);`, [name, action]);
   };
-  const newMenu = async (action) => evaluate(`await wait(() => control('button', 'New'), 'New button');
-    click('button', 'New');
-    await wait(() => control('.q-menu .q-item', values[0]), 'New menu control');
-    click('.q-menu .q-item', values[0]);`, [action]);
+  const newMenu = async (action) => {
+    const point = await evaluate(`await wait(() => control('button', 'New'), 'New button');
+      click('button', 'New');
+      await wait(() => {
+        const item = control('.q-menu .q-item', values[0]);
+        if (!item) return false;
+        const rect = item.getBoundingClientRect();
+        return item.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+      }, 'New menu control');
+      const rect = control('.q-menu .q-item', values[0]).getBoundingClientRect();
+      return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };`, [action]);
+    await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+    await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...point });
+    await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...point });
+    (record.newMenuClicks ??= []).push({ action, ...point });
+  };
   const enterName = async (value) => {
     await evaluate(`await wait(() => document.querySelector('.q-dialog input')?.getBoundingClientRect().width > 0, 'New name input');
       const input = document.querySelector('.q-dialog input'); input.focus(); input.select();`);
