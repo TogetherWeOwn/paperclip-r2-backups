@@ -86,7 +86,7 @@ export async function readControlJson(
       buffer.set(value, size);
       size = required;
     }
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size));
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(buffer.subarray(0, size));
     const result = record(JSON.parse(text));
     complete = true;
     return result;
@@ -130,7 +130,7 @@ export function decodeBase64(value: unknown, encodedBytes: number, decodedBytes:
   }
   if (binary.length > decodedBytes) throw new InputError();
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(binary, (ch) => ch.charCodeAt(0)));
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(binary, (ch) => ch.charCodeAt(0)));
   } catch {
     throw new InputError();
   }
