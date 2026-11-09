@@ -140,7 +140,7 @@ test("the exact selected email-constructor derivative exercises all enabled API 
   const realFetch = globalThis.fetch;
   t.mock.method(globalThis, "fetch", async (url, options) => String(url) === "https://dashboard-client.cloudflareaccess.com/cdn-cgi/access/certs" ? Response.json({ keys: [access.jwk] }) : realFetch(url, options));
   const state = mockBucket();
-  const previews = seedPreviews(state);
+  const previews = await seedPreviews(state);
   state.objects.set(".hidden", { bytes: new TextEncoder().encode("hidden") });
   const manifest = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
   const derivative = JSON.parse(await readFile(new URL("email-constructor-v1/manifest.json", root), "utf8"));

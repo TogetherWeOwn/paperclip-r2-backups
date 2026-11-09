@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { gzipSync } from "node:zlib";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { embeddedPdf, cachedPdfProbe } from "./pdf-fixtures.mjs";
 
 const folder = "db/qualification/";
 const text = "Unicode café Ω\n<b>preview-marker</b>\nlast-line";
@@ -37,7 +38,7 @@ function ordinaryPdf() {
   return Buffer.from(pdf);
 }
 
-export function seedPreviews(state) {
+export async function seedPreviews(state) {
   const corpus = [
     ["case-text.txt", text, "text/plain"],
     ["case-json.json", JSON.stringify({ message: text }), "application/json"],
@@ -49,10 +50,14 @@ export function seedPreviews(state) {
     ["case-email.eml", email, "message/rfc822"],
     ["case-image.png", Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO1sAAAAASUVORK5CYII=", "base64"), "image/png"],
     ["case-pdf.pdf", ordinaryPdf(), "application/pdf"],
+    ["case-embedded.pdf", await embeddedPdf(), "application/pdf"],
   ];
   for (const [name, body, contentType] of corpus) {
     state.objects.set(folder + name, { bytes: Buffer.from(body), httpMetadata: { contentType } });
   }
+  const artifacts = new URL("../artifacts/previews/", import.meta.url);
+  await mkdir(artifacts, { recursive: true });
+  await writeFile(new URL("case-embedded.pdf", artifacts), state.objects.get(folder + "case-embedded.pdf").bytes);
   for (const prefix of ["", "instance/qualification/", "db/???/"]) {
     state.objects.set(prefix + "case-pdf.pdf", { bytes: ordinaryPdf(), httpMetadata: { contentType: "application/pdf" } });
   }
@@ -180,29 +185,102 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
         `);
         assert.equal(record.actual.pages.length, 2);
         assert.ok(record.actual.pages.every((page) => page.width > 0 && page.height > 0 && page.ink > 100), "Both PDF canvases contain visible glyphs");
-        record.actual.annotationImages = await evaluate(`
-          const images = () => [...document.querySelectorAll('#pdfvuer .annotationLayer img')];
-          await wait(() => images().length > 0 && images().every(image => image.complete), 'PDF annotation image responses');
-          return images().map(image => ({url:image.src, complete:image.complete, width:image.naturalWidth, height:image.naturalHeight}));
-        `);
-        const expectedImage = `${origin}/BACKUPS/files/${parameter}/annotation-note.svg`;
-        const responses = evidence.network.slice(networkStart).filter(response => record.actual.annotationImages.some(image => image.url === response.url));
-        record.actual.annotationResponses = [];
-        for (const response of responses) {
-          const body = await cdp.call("Network.getResponseBody", { requestId: response.requestId });
-          // Only the authored annotation subresource is retained, not object bytes.
-          const bytes = Buffer.from(body.body, body.base64Encoded ? "base64" : "utf8");
-          record.actual.annotationResponses.push({ ...response, bytes: bytes.length,
-            sha256: createHash("sha256").update(bytes).digest("hex"),
-            redirects: evidence.redirects.filter(redirect => redirect.requestId === response.requestId) });
-        }
-        const accept = () => acceptAnnotationImages(record.actual.annotationImages, record.actual.annotationResponses, expectedImage);
-        if (mode === "normal") accept();
-        else {
-          assert.ok(record.actual.annotationResponses.length > 0, "Controlled image failure retained its actual network response");
-          assert.ok(record.actual.annotationResponses.every(response => response.status === 500));
-          assert.throws(accept, assert.AssertionError, "The same passing-image helper must reject every backend failure control");
-          record.rejectionControl = true;
+        if (name === "case-embedded.pdf") {
+          record.fonts = await evaluate(`
+            const components = [...document.querySelectorAll('#pdfvuer [id="viewerContainer"]')]
+              .map(element => element.__vueParentComponent.proxy);
+            if (components.length !== 2 || components.some(component => !component.pdf)) throw new Error('PDF component state missing');
+            const documentProxy = components[0].pdf;
+            const worker = documentProxy.loadingTask._worker;
+            const entries = Object.entries(documentProxy._transport.commonObjs._objs);
+            const fonts = entries.filter(([, entry]) => entry.data?.compiledGlyphs).map(([id, entry]) => {
+              const font = entry.data;
+              const paths = entries.filter(([key]) => key.startsWith(font.loadedName + '_path_')).map(([, path]) => path.data);
+              return {id, loadedName:font.loadedName, missingFile:font.missingFile, disableFontFace:font.disableFontFace,
+                isEvalSupported:font.isEvalSupported, bytes:font.data?.length,
+                glyphs:Object.values(font.compiledGlyphs).map(glyph => glyph.toString()),
+                numericPaths:paths.length > 0 && paths.every(path => path.every(operation =>
+                  !operation.args || operation.args.every(argument => typeof argument === 'number' && Number.isFinite(argument))))};
+            });
+            const text = [];
+            for (let number = 1; number <= 2; number++) {
+              const page = await documentProxy.getPage(number);
+              text.push((await page.getTextContent()).items.map(item => item.str).join(''));
+            }
+            await document.fonts.ready;
+            return {fonts, text, fakeWorker:!!worker && worker._webWorker === null && worker.port.constructor.name === 'LoopbackPort',
+              fontFaces:[...document.fonts].filter(font => fonts.some(entry => font.family.replaceAll('"', '') === entry.loadedName))
+                .map(font => ({family:font.family, status:font.status}))};
+          `);
+          assert.equal(record.fonts.fakeWorker, true, "The real PDF loading task uses the bundled loopback worker");
+          assert.deepEqual(record.fonts.text, ["Embedded Roboto 0123456789", "0123456789"]);
+          assert.ok(record.fonts.fonts.length > 0);
+          assert.ok(record.fonts.fontFaces.length > 0 && record.fonts.fontFaces.every(font => font.status === "loaded"), "Embedded font faces actually load");
+          for (const font of record.fonts.fonts) {
+            assert.equal(font.missingFile, false);
+            assert.equal(font.disableFontFace, false);
+            assert.ok(font.bytes > 0);
+            assert.equal(font.isEvalSupported, true, "No test override of the renderer's eval option");
+            assert.equal(font.numericPaths, true);
+            assert.ok(font.glyphs.length >= 10, "All ten numeric glyph paths were compiled by normal rendering");
+            assert.ok(font.glyphs.every(source => source.includes(".apply(") && source.includes("q.cmd")), "Every cached glyph uses the shipped non-eval interpreter");
+          }
+          const glyphMethod = await cdp.call("Runtime.evaluate", {
+            expression: `Object.values(document.querySelector('#pdfvuer [id="viewerContainer"]').__vueParentComponent.proxy.pdf._transport.commonObjs._objs)
+              .find(entry => entry.data?.compiledGlyphs).data.getPathGenerator`,
+            allowUnsafeEvalBlockedByCSP: false,
+          });
+          assert.equal(glyphMethod.exceptionDetails, undefined);
+          record.evalProbe = await cachedPdfProbe(cdp, glyphMethod.result.objectId);
+          assert.deepEqual(record.evalProbe, { cached: true, value: false }, "Inspect the actual cached PDF.js feature probe, not a substitute Function test");
+          const measureResize = async (previousWidth) => evaluate(`
+            const canvases = () => [...document.querySelectorAll('#pdfvuer canvas')];
+            await wait(() => canvases().length === 2 && canvases().every(canvas => canvas.width > 0 && canvas.width !== ${previousWidth}), 'PDF resize dimensions');
+            const ink = canvas => {
+              const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+              let count = 0;
+              for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 3] && pixels[i] < 200 && pixels[i + 1] < 200 && pixels[i + 2] < 200) count++;
+              return count;
+            };
+            await wait(() => canvases().every(canvas => ink(canvas) > 100), 'PDF resize glyph painting');
+            return canvases().map(canvas => ({width:canvas.width, height:canvas.height, ink:ink(canvas)}));
+          `);
+          try {
+            await cdp.call("Emulation.setDeviceMetricsOverride", { width: 900, height: 700, deviceScaleFactor: 1, mobile: false });
+            record.narrow = await measureResize(record.actual.pages[0].width);
+            const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
+            await writeFile(new URL(`${id}-narrow.png`, artifacts), Buffer.from(screenshot.data, "base64"));
+          } finally {
+            await cdp.call("Emulation.setDeviceMetricsOverride", { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+          }
+          record.restored = await measureResize(record.narrow[0].width);
+          assert.deepEqual(record.restored.map(page => [page.width, page.height]), record.actual.pages.map(page => [page.width, page.height]));
+          assert.deepEqual(evidence.network.slice(networkStart).filter(response => response.type === "Worker" || /\.worker[.-]/i.test(response.url)), [], "No separately fetched real or remote PDF worker");
+        } else {
+          record.actual.annotationImages = await evaluate(`
+            const images = () => [...document.querySelectorAll('#pdfvuer .annotationLayer img')];
+            await wait(() => images().length > 0 && images().every(image => image.complete), 'PDF annotation image responses');
+            return images().map(image => ({url:image.src, complete:image.complete, width:image.naturalWidth, height:image.naturalHeight}));
+          `);
+          const expectedImage = `${origin}/BACKUPS/files/${parameter}/annotation-note.svg`;
+          const responses = evidence.network.slice(networkStart).filter(response => record.actual.annotationImages.some(image => image.url === response.url));
+          record.actual.annotationResponses = [];
+          for (const response of responses) {
+            const body = await cdp.call("Network.getResponseBody", { requestId: response.requestId });
+            // Only the authored annotation subresource is retained, not object bytes.
+            const bytes = Buffer.from(body.body, body.base64Encoded ? "base64" : "utf8");
+            record.actual.annotationResponses.push({ ...response, bytes: bytes.length,
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+              redirects: evidence.redirects.filter(redirect => redirect.requestId === response.requestId) });
+          }
+          const accept = () => acceptAnnotationImages(record.actual.annotationImages, record.actual.annotationResponses, expectedImage);
+          if (mode === "normal") accept();
+          else {
+            assert.ok(record.actual.annotationResponses.length > 0, "Controlled image failure retained its actual network response");
+            assert.ok(record.actual.annotationResponses.every(response => response.status === 500));
+            assert.throws(accept, assert.AssertionError, "The same passing-image helper must reject every backend failure control");
+            record.rejectionControl = true;
+          }
         }
       } else if (name.endsWith(".png")) {
         record.actual = await evaluate(`
