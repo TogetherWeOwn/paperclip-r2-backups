@@ -250,6 +250,7 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     await writeFile(new URL("../artifacts/dashboard-client.png", import.meta.url), Buffer.from(screenshot.data, "base64"));
     await qualifyPreviews(cdp, origin, previews, browserEvidence);
     assert.deepEqual(failures, [], "Click-driven previews must not introduce failed API/static requests");
+    assert.deepEqual(browserEvidence.exceptions, [], "Click-driven previews must not introduce application runtime exceptions");
     assert.equal(new TextDecoder().decode(state.objects.get("db/qualification/case-text.txt").bytes), "saved UI marker");
   } finally {
     await mkdir(new URL("../artifacts/", import.meta.url), { recursive: true });

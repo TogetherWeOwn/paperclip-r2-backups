@@ -89,7 +89,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
       })()`,
       allowUnsafeEvalBlockedByCSP: false, awaitPromise: true, returnByValue: true,
     });
-    assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+    if (result.exceptionDetails) assert.fail(result.exceptionDetails.exception?.description || result.exceptionDetails.text);
     return result.result.value;
   };
   const url = `${origin}/BACKUPS/files/${encodeURIComponent(Buffer.from(folder).toString("base64"))}`;
@@ -102,10 +102,14 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
       await loaded;
       const point = await evaluate(`
         const name = ${JSON.stringify(name)};
-        const row = () => [...document.querySelectorAll('tbody tr')].find(row => row.querySelector('td')?.textContent.trim() === name);
+        // The name cell contains both an icon element and the filename text node.
+        const filename = row => [...(row.querySelector('td')?.childNodes || [])]
+          .filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim();
+        const row = () => [...document.querySelectorAll('tbody tr')].find(row => filename(row) === name);
         await wait(() => !!row(), 'File listing');
-        row().scrollIntoView({block:'center'});
-        const rect = row().querySelector('td').getBoundingClientRect();
+        const selected = row();
+        selected.scrollIntoView({block:'center'});
+        const rect = selected.querySelector('td').getBoundingClientRect();
         return {x: rect.x + Math.min(40, rect.width / 2), y: rect.y + rect.height / 2};
       `);
       await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
@@ -113,7 +117,11 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
         await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount, ...point });
         await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount, ...point });
       }
-      await evaluate(`await wait(() => !!document.querySelector('.q-dialog .q-card__section.scroll'), 'Preview dialog'); return true;`);
+      record.openedPath = await evaluate(`
+        await wait(() => !!document.querySelector('.q-dialog .q-card__section.scroll'), 'Preview dialog');
+        await wait(() => decodeURIComponent(location.pathname).endsWith('/' + ${JSON.stringify(Buffer.from(name).toString("base64"))}), 'Selected file route');
+        return location.pathname;
+      `);
       if (name.endsWith(".pdf")) {
         record.actual = await evaluate(`
           await wait(() => document.querySelectorAll('#pdfvuer canvas').length === 2 && [...document.querySelectorAll('#pdfvuer .page')].every(page => page.dataset.loaded === 'true'), 'Two rendered PDF pages');
@@ -169,7 +177,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
       record.status = "pass";
     } catch (error) {
       record.status = "fail";
-      record.error = String(error);
+      record.error = String(error).slice(0, 4096);
     } finally {
       const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
       await writeFile(new URL(`${name}.png`, artifacts), Buffer.from(screenshot.data, "base64"));
@@ -177,5 +185,6 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
     }
   }
   await writeFile(new URL("results.json", artifacts), JSON.stringify(evidence.previews, null, 2));
-  assert.deepEqual(evidence.previews.filter((record) => record.status !== "pass"), [], "Every authored click-driven preview must qualify; no silent skip");
+  const failed = evidence.previews.filter((record) => record.status !== "pass");
+  assert.equal(failed.length, 0, `Every authored click-driven preview must qualify; no silent skip:\n${failed.map(record => `${record.name}: ${record.error}`).join("\n")}`);
 }
