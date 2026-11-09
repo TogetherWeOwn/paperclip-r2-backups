@@ -13,28 +13,47 @@ import { seedPreviews, qualifyPreviews } from "./preview-fixtures.mjs";
 
 const root = new URL("../dashboard/", import.meta.url);
 
-async function launchChrome(profile) {
+async function launchChrome(profile, evidence) {
+  const startup = evidence.startup = {
+    deadlineMs: 15_000, status: "starting", stderr: "", exitCode: null, signalCode: null,
+  };
   const chrome = spawn(process.env.CHROME_BIN || "google-chrome", [
     "--headless=new", "--no-first-run", "--disable-background-networking",
     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
-  let diagnostics = "";
+  const started = performance.now();
   try {
     const url = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Chrome qualification startup deadline exceeded")), 15_000);
+      const timer = setTimeout(() => reject(new Error("Chrome qualification startup deadline exceeded")), startup.deadlineMs);
       const finish = (fn, value) => { clearTimeout(timer); fn(value); };
-      chrome.once("error", () => finish(reject, new Error("Chrome unavailable: real-client qualification prerequisite is missing")));
-      chrome.once("exit", () => finish(reject, new Error(`Chrome exited before qualification: ${diagnostics}`)));
+      chrome.once("error", (error) => {
+        startup.spawnErrorCode = error.code;
+        finish(reject, new Error("Chrome unavailable: real-client qualification prerequisite is missing"));
+      });
+      chrome.once("exit", (code, signal) => {
+        startup.exitCode = code;
+        startup.signalCode = signal;
+        finish(reject, new Error(`Chrome exited before qualification: ${startup.stderr}`));
+      });
       chrome.stderr.on("data", (chunk) => {
-        diagnostics = (diagnostics + chunk).slice(-8192);
-        const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(diagnostics);
+        startup.stderr = (startup.stderr + chunk).slice(-8192);
+        const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(startup.stderr);
         if (match) finish(resolve, match[1]);
       });
     });
+    startup.status = "ready";
     return { chrome, url };
   } catch (error) {
-    if (chrome.exitCode === null && chrome.pid) { chrome.kill("SIGKILL"); await once(chrome, "exit"); }
+    startup.status = "failed";
+    startup.error = String(error).slice(0, 1024);
+    if (chrome.exitCode === null && chrome.signalCode === null && chrome.pid) {
+      const exited = once(chrome, "exit");
+      chrome.kill("SIGKILL");
+      await exited;
+    }
     throw error;
+  } finally {
+    startup.elapsedMs = Math.round(performance.now() - started);
   }
 }
 
@@ -133,7 +152,7 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     origin = `http://127.0.0.1:${server.address().port}`;
-    launched = await launchChrome(profile);
+    launched = await launchChrome(profile, browserEvidence);
     const debugOrigin = new URL(launched.url);
     const target = await realFetch(`http://${debugOrigin.host}/json/new?about:blank`, { method: "PUT" }).then((r) => r.json());
     cdp = await connect(target.webSocketDebuggerUrl);
