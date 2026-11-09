@@ -264,7 +264,8 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
               pages:components.map(component => ({scale:component.scale, resize:component.resize,
                 container:box(component.$refs.container), viewport:{width:component.pdfViewer.viewport.width, height:component.pdfViewer.viewport.height},
                 sensors:component.$.subTree.children[1].children.filter(node => node.component)
-                  .map(node => ({size:node.component.proxy.size, box:box(node.component.proxy.$el),
+                  // Copy numeric fields: CDP serializes the nested reactive proxy as {}.
+                  .map(node => ({size:{width:node.component.proxy.size.width, height:node.component.proxy.size.height}, box:box(node.component.proxy.$el),
                     scroll:[...node.component.proxy.$el.children].map(element => ({left:element.scrollLeft, top:element.scrollTop, width:element.scrollWidth, height:element.scrollHeight}))}))})),
               canvases:[...document.querySelectorAll('#pdfvuer canvas')].map(canvas => ({width:canvas.width, height:canvas.height}))};
           `);
