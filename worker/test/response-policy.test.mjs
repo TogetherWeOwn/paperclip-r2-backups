@@ -7,8 +7,10 @@ import { mockBucket, signedAccess, request, keyPath } from "./fixtures.mjs";
 
 const root = new URL("../dashboard/", import.meta.url);
 const navigation = "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; sandbox allow-downloads";
-const scripts = ["AuthLayout.db6e752c.js", "EmailFilePage.8578c819.js", "ErrorNotFound.1cad377e.js", "LoginPage.c1ee667f.js", "auth-store.ba1aa298.js", "auth.315647f3.js", "bus.2c308485.js", "index.97b9144c.js"];
-const paths = ["/assets/", "/spa/assets/"].flatMap((prefix) => scripts.map((name) => prefix + name));
+const scripts = ["AuthLayout", "EmailFilePage", "ErrorNotFound", "LoginPage", "auth-store", "auth", "bus", "index"].map(name => name + ".email-constructor-v1.js");
+const paths = scripts.map(name => "/assets/" + name);
+const conditionalHeaders = ["if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "if-range", "range"];
+const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 function expected(origin = "https://console.test") {
   return "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; script-src " + paths.map((path) => origin + path).join(" ") + " 'sha256-ivd6tHqEA4mIbBgQ80xHC/HM2TD8VhP3tLA5jLgSI+0='; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self' data:; media-src blob:; connect-src 'self' blob:; worker-src 'none'; frame-src 'self'";
 }
@@ -18,79 +20,162 @@ async function fixture(t, team) {
   const token = await access.token();
   const state = mockBucket();
   const seen = [];
+  const original = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
+  const derivative = JSON.parse(await readFile(new URL("email-constructor-v1/manifest.json", root), "utf8"));
   const env = {
     ACCESS_TEAM_NAME: team, ACCESS_AUD: "fixture-aud", BACKUPS: state.bucket,
     ASSETS: { async fetch(req) {
       seen.push(req);
-      const path = new URL(req.url).pathname.slice(1);
-      const script = paths.includes("/" + path);
-      return new Response(script ? await readFile(new URL(path, root)) : "original document", {
-        headers: { "content-type": script ? "text/javascript; charset=utf-8" : "text/html", "cache-control": "public, max-age=86400", "content-security-policy": "default-src *", etag: '"static"' },
+      let path = new URL(req.url).pathname.slice(1);
+      if (path === "email-constructor-v1/") path += "index.html";
+      if (!path || !path.includes(".")) path = "index.html";
+      if (!Object.hasOwn(original.files, path) && !Object.hasOwn(derivative.files, path)) return new Response("Not found", { status: 404 });
+      const type = path.endsWith(".js") ? "text/javascript; charset=utf-8" : path.endsWith(".css") ? "text/css" : "text/html";
+      return new Response(await readFile(new URL(path, root)), {
+        headers: { "content-type": type, "cache-control": "public, max-age=86400", "content-security-policy": "default-src *", etag: '"static"' },
       });
     } },
   };
-  return { ...state, env, seen, send(req) { req.headers.set("cf-access-jwt-assertion", token); return worker.fetch(req, env, {}); } };
+  return { ...state, env, seen, original, derivative, send(req) { req.headers.set("cf-access-jwt-assertion", token); return worker.fetch(req, env, {}); } };
 }
 function policy(response, value) {
   assert.equal(response.headers.get("content-security-policy"), value);
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.equal(response.headers.get("content-security-policy-report-only"), null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
 }
 
-test("exact document policy covers entrypoints, SPA fallback, cache responses and method/auth errors", async (t) => {
+test("navigation aliases and recognized deep links select the exact disclosed derivative without changing the browser URL", async (t) => {
   const f = await fixture(t, "document-policy");
-  for (const path of ["/", "/index.html", "/spa/", "/spa/index.html", "/files/BACKUPS/db/", "/spa/files/BACKUPS/db/", "/assets/index.8a66f01f.css"]) {
+  for (const path of ["/", "/index.html", "/spa", "/spa/", "/spa/index.html", "/email-constructor-v1/", "/email-constructor-v1/index.html", "/BACKUPS/files/ZGIv/", "/spa/files/BACKUPS/db/"]) {
     for (const method of ["GET", "HEAD"]) {
-      const response = await f.send(request(path, { method, headers: { "if-none-match": '"old-html"', "x-forwarded-host": "untrusted.test" } }));
+      const req = request(path + "?ignored=1", { method, headers: { ...Object.fromEntries(conditionalHeaders.map(name => [name, '"old"'])), "x-forwarded-host": "untrusted.test" } });
+      const before = req.url;
+      const response = await f.send(req);
       assert.equal(response.status, 200);
       policy(response, expected());
-      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal(response.headers.get("content-location"), "/email-constructor-v1/");
+      assert.equal(response.headers.get("location"), null);
+      const body = Buffer.from(await response.arrayBuffer());
+      assert.equal(body.length, method === "HEAD" ? 0 : 2321);
+      if (method === "GET") assert.equal(digest(body), f.derivative.files["email-constructor-v1/index.html"].sha256);
+      assert.equal(req.url, before);
+      const fetched = f.seen.at(-1);
+      assert.equal(fetched.url, "https://console.test/email-constructor-v1/");
+      assert.equal(fetched.method, "GET");
+      assert.equal(fetched.redirect, "manual");
+      for (const name of conditionalHeaders) assert.equal(fetched.headers.get(name), null);
     }
   }
-  f.env.ASSETS.fetch = async () => new Response(null, { status: 304, headers: { etag: '"old-html"' } });
-  const cached = await f.send(request("/index.html"));
-  assert.equal(cached.status, 304);
-  policy(cached, expected());
-  assert.equal(cached.headers.get("cache-control"), "no-store");
+  const css = await f.send(request("/assets/index.74f0784c.css"));
+  assert.equal(css.status, 200);
+  assert.equal(css.headers.get("content-location"), null);
+  assert.equal(digest(Buffer.from(await css.arrayBuffer())), f.original.files["assets/index.74f0784c.css"]);
+  policy(css, expected());
   policy(await f.send(request("/", { method: "POST", headers: { "sec-fetch-site": "same-origin" } })), expected());
-  policy(await worker.fetch(request("/"), {}, {}), expected());
-  policy(await worker.fetch(request("/api/server/config"), {}, {}), navigation);
   assert.deepEqual(f.calls, []);
 });
 
-test("all 16 trusted scripts retain manifest bytes and MIME without redirects, query aliases or partial-cache reuse", async (t) => {
+test("selected document fetch rejects redirects, cache/partial responses, wrong MIME and changed HTML", async (t) => {
+  const f = await fixture(t, "document-integrity");
+  const html = await readFile(new URL("email-constructor-v1/index.html", root));
+  for (const make of [
+    () => Response.redirect("https://console.test/index.html"),
+    () => new Response(null, { status: 304 }),
+    () => new Response(html, { status: 206, headers: { "content-type": "text/html" } }),
+    () => new Response(html, { headers: { "content-type": "text/plain" } }),
+    () => new Response(Buffer.from(html).fill(32, 0, 1), { headers: { "content-type": "text/html" } }),
+    () => new Response(html, { headers: { location: "/index.html", "content-type": "text/html" } }),
+    () => new Response("Not found", { status: 404 }),
+  ]) {
+    f.env.ASSETS.fetch = async () => make();
+    for (const method of ["GET", "HEAD"]) {
+      const response = await f.send(request("/index.html", { method }));
+      assert.equal(response.status, 500);
+      policy(response, expected());
+    }
+  }
+});
+
+test("arbitrary HTML, failed assets and redirects never become the selected SPA document", async (t) => {
+  const f = await fixture(t, "fallback-identity");
+  for (const make of [
+    () => new Response("other HTML", { headers: { "content-type": "text/html" } }),
+    () => new Response("missing", { status: 404, headers: { "content-type": "text/html" } }),
+    () => Response.redirect("https://console.test/"),
+  ]) {
+    const asset = make();
+    f.env.ASSETS.fetch = async () => asset;
+    const response = await f.send(request("/unknown-file.svg"));
+    assert.equal(response.status, asset.status);
+    assert.equal(response.headers.get("content-location"), null);
+    policy(response, expected());
+  }
+});
+
+test("all eight trusted scripts retain separate selected bytes with no partial-cache or query-selected body", async (t) => {
   const f = await fixture(t, "script-identity");
-  const manifest = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
   for (const path of paths) {
     for (const method of ["GET", "HEAD"]) {
-      const response = await f.send(request(path + "?ignored=1", { method, headers: { "if-none-match": '"old"', "if-modified-since": "Sun, 01 Nov 2026 00:00:00 GMT", range: "bytes=0-1" } }));
+      const response = await f.send(request(path + "?ignored=1", { method, headers: Object.fromEntries(conditionalHeaders.map(name => [name, '"old"'])) }));
       assert.equal(response.status, 200);
       policy(response, expected());
       assert.equal(response.headers.get("location"), null);
       assert.equal(response.headers.get("content-type"), "text/javascript; charset=utf-8");
       const bytes = Buffer.from(await response.arrayBuffer());
-      if (method === "GET") assert.equal(createHash("sha256").update(bytes).digest("hex"), manifest.files[path.slice(1)]);
-      else assert.equal(bytes.length, 0);
+      if (method === "GET") {
+        assert.equal(digest(bytes), f.derivative.files[path.slice(1)].sha256);
+        assert.equal(bytes.length, f.derivative.files[path.slice(1)].bytes);
+      } else assert.equal(bytes.length, 0);
       const fetched = f.seen.at(-1);
       assert.equal(fetched.method, "GET");
       assert.equal(fetched.url, "https://console.test" + path);
       assert.equal(fetched.redirect, "manual");
-      for (const name of ["if-none-match", "if-modified-since", "range"]) assert.equal(fetched.headers.get(name), null);
+      for (const name of conditionalHeaders) assert.equal(fetched.headers.get(name), null);
     }
   }
-  for (const make of [
-    () => Response.redirect("https://console.test/api/server/config"),
-    () => new Response(null, { status: 304 }),
-    () => new Response("partial", { status: 206, headers: { "content-type": "text/javascript" } }),
-    () => new Response("fallback", { headers: { "content-type": "text/html" } }),
-    () => new Response("not the pinned bytes", { headers: { "content-type": "text/javascript" } }),
-    () => new Response("not followed", { headers: { location: "/api/server/config", "content-type": "text/javascript" } }),
-  ]) {
-    f.env.ASSETS.fetch = async () => make();
-    const response = await f.send(request(paths[0]));
-    assert.equal(response.status, 500);
+  for (const path of paths) {
+    const bytes = await readFile(new URL(path.slice(1), root));
+    for (const make of [
+      () => Response.redirect("https://console.test/api/server/config"),
+      () => new Response(null, { status: 304 }),
+      () => new Response(bytes, { status: 206, headers: { "content-type": "text/javascript" } }),
+      () => new Response(bytes, { headers: { "content-type": "text/html" } }),
+      () => new Response("<html>fallback</html>", { headers: { "content-type": "text/javascript" } }),
+      () => new Response(Buffer.from(bytes).fill(32, 0, 1), { headers: { "content-type": "text/javascript" } }),
+      () => new Response(bytes, { headers: { location: "/api/server/config", "content-type": "text/javascript" } }),
+      () => new Response("Not found", { status: 404 }),
+    ]) {
+      f.env.ASSETS.fetch = async () => make();
+      for (const method of ["GET", "HEAD"]) {
+        const response = await f.send(request(path, { method }));
+        assert.equal(response.status, 500);
+        policy(response, expected());
+        assert.ok((await response.text()).length < 1024);
+      }
+    }
+  }
+});
+
+test("legacy root and SPA scripts stay original and authenticated but are absent from executable policy", async (t) => {
+  const f = await fixture(t, "legacy-identity");
+  for (const path of Object.keys(f.original.files).filter(path => path.endsWith(".js"))) {
+    const response = await f.send(request("/" + path));
+    assert.equal(response.status, 200);
+    assert.equal(digest(Buffer.from(await response.arrayBuffer())), f.original.files[path]);
+    assert.equal(response.headers.get("content-security-policy").split("; script-src ")[1].split(";", 1)[0].includes("https://console.test/" + path), false);
+  }
+  for (const path of ["/assets/index.email-constructor-v1.js", "/spa/assets/index.email-constructor-v1.js", "/email-constructor-v1/manifest.json", "/index.html", "/BACKUPS/files/ZGIv/"]) {
+    const before = f.seen.length;
+    const response = await worker.fetch(request(path), f.env, {});
+    assert.equal(response.status, 403);
+    assert.equal(f.seen.length, before);
     policy(response, expected());
-    assert.ok((await response.text()).length < 1024);
+  }
+  for (const path of ["/spa/assets/index.email-constructor-v1.js", "/other/index.email-constructor-v1.js"]) {
+    const response = await f.send(request(path));
+    assert.equal(response.status, 404);
+    policy(response, expected());
   }
 });
 
@@ -101,13 +186,14 @@ test("API navigation policy wins after object metadata without buffering or modi
   const path = "/api/buckets/BACKUPS/" + keyPath("db/preview.html");
   for (const method of ["GET", "HEAD"]) {
     const response = await f.send(request(path, { method }));
-    policy(response, navigation);
+    assert.equal(response.headers.get("content-security-policy"), navigation);
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
     assert.equal(response.headers.get("content-type"), "text/html");
     assert.match(response.headers.get("content-disposition"), /^attachment;/);
     assert.equal(response.headers.get("cache-control"), "private, max-age=60");
     assert.deepEqual(new Uint8Array(await response.arrayBuffer()), method === "HEAD" ? new Uint8Array() : bytes);
   }
-  for (const path of ["/api", "/api/unknown", "/api/server/config", "/api/buckets/BACKUPS/" + keyPath("absent")]) policy(await f.send(request(path)), navigation);
+  for (const path of ["/api", "/api/unknown", "/api/server/config", "/api/buckets/BACKUPS/" + keyPath("absent")]) assert.equal((await f.send(request(path))).headers.get("content-security-policy"), navigation);
   assert.equal(f.seen.length, 0);
 });
 
@@ -125,8 +211,8 @@ test("policy origin uses only validated effective URL origin, allowing HTTP only
   assert.equal(f.seen.length, before);
 });
 
-test("the sole inline bootstrap hash still identifies both original HTML script bodies", async () => {
-  for (const path of ["index.html", "spa/index.html"]) {
+test("the sole inline bootstrap is identical across original and derivative HTML", async () => {
+  for (const path of ["index.html", "spa/index.html", "email-constructor-v1/index.html"]) {
     const html = await readFile(new URL(path, root), "utf8");
     // Exact delimiters in the integrity-pinned fixture, not an HTML sanitizer.
     const start = html.indexOf("<script>");

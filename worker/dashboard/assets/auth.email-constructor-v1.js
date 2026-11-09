@@ -1,0 +1,1 @@
+import{b as e,u as r}from"./index.email-constructor-v1.js";import{u as s}from"./auth-store.email-constructor-v1.js";var c=e(async({app:o,router:t,store:a})=>{await s(a).CheckLoginInStorage(t,o.config.globalProperties.$q)===!1&&await r(a).loadServerConfigs(t,o.config.globalProperties.$q,!0)});export{c as default};

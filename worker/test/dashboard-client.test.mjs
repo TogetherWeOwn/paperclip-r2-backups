@@ -134,7 +134,7 @@ async function connect(url) {
   };
 }
 
-test("the exact unmodified dashboard client exercises all enabled API contracts", async (t) => {
+test("the exact selected email-constructor derivative exercises all enabled API contracts and previews", async (t) => {
   const access = await signedAccess("dashboard-client");
   const jwt = await access.token();
   const realFetch = globalThis.fetch;
@@ -143,6 +143,7 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
   const previews = seedPreviews(state);
   state.objects.set(".hidden", { bytes: new TextEncoder().encode("hidden") });
   const manifest = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
+  const derivative = JSON.parse(await readFile(new URL("email-constructor-v1/manifest.json", root), "utf8"));
   const routes = [];
   const failures = [];
   let origin;
@@ -150,8 +151,9 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     BACKUPS: state.bucket, ACCESS_TEAM_NAME: access.team, ACCESS_AUD: "fixture-aud",
     ASSETS: { async fetch(request) {
       let path = new URL(request.url).pathname.slice(1);
+      if (path === "email-constructor-v1/") path += "index.html";
       if (!path || !path.includes(".")) path = "index.html";
-      if (!Object.hasOwn(manifest.files, path)) return new Response("Not found", { status: 404 });
+      if (!Object.hasOwn(manifest.files, path) && !Object.hasOwn(derivative.files, path)) return new Response("Not found", { status: 404 });
       const extension = path.split(".").pop();
       const types = { js: "text/javascript", css: "text/css", html: "text/html", svg: "image/svg+xml", png: "image/png", woff: "font/woff", woff2: "font/woff2", ico: "image/x-icon" };
       return new Response(await readFile(new URL(path, root)), { headers: { "content-type": types[extension] || "application/octet-stream" } });
@@ -244,7 +246,12 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     }
     const evaluated = await cdp.call("Runtime.evaluate", {
       expression: `(async () => {
-        const m = await import('/assets/index.97b9144c.js');
+        const app = document.querySelector('#q-app').__vue_app__;
+        const m = await import('/assets/index.email-constructor-v1.js');
+        const lazy = await import('/assets/EmailFilePage.email-constructor-v1.js');
+        const graph = {sameApplication: document.querySelector('#q-app').__vue_app__ === app,
+          sameMain: m === await import('/assets/index.email-constructor-v1.js'), lazyLoaded: !!lazy.default,
+          scripts: performance.getEntriesByType('resource').filter(r => new URL(r.name).pathname.endsWith('.js')).map(r => new URL(r.name).pathname)};
         const config = (await m.a.get('/server/config')).data;
         const store = m.u();
         store.showHiddenFiles = config.config.showHiddenFiles;
@@ -272,13 +279,20 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
         const part = (await m.G.multipartUpload(upload.uploadId, 1, 'BACKUPS', 'db/parts.txt', file, () => {})).data;
         const complete = (await m.G.multipartComplete(file, 'db/parts.txt', 'BACKUPS', [part], upload.uploadId)).data;
         await m.G.deleteObject('db/moved.txt', 'BACKUPS');
-        return {config, listed: listed.objects.length, visible: visible.files.map(f => f.name), head: head.key,
+        return {config, graph, listed: listed.objects.length, visible: visible.files.map(f => f.name), head: head.key,
           edited: edited.key, downloaded: new TextDecoder().decode(downloaded.data), slashKeys, complete};
       })()`,
       awaitPromise: true, returnByValue: true,
     });
     assert.equal(evaluated.exceptionDetails, undefined, JSON.stringify(evaluated.exceptionDetails));
     const result = evaluated.result.value;
+    assert.equal(result.graph.sameApplication, true);
+    assert.equal(result.graph.sameMain, true);
+    assert.equal(result.graph.lazyLoaded, true);
+    assert.ok(result.graph.scripts.includes("/assets/index.email-constructor-v1.js"));
+    assert.ok(result.graph.scripts.includes("/assets/EmailFilePage.email-constructor-v1.js"));
+    for (const path of result.graph.scripts) assert.ok(Object.hasOwn(derivative.files, path.slice(1)), path);
+    browserEvidence.moduleGraph = result.graph;
     assert.equal(result.config.dashboardVersion, "1.2.0");
     assert.equal(result.config.config.showHiddenFiles, false);
     assert.ok(result.listed > 0);

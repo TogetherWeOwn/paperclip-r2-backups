@@ -20,8 +20,9 @@ async function authenticated(t, team) {
     ASSETS: { fetch: async (req) => {
       assets++;
       const path = new URL(req.url).pathname;
-      if (path === "/assets/index.97b9144c.js") return new Response(await readFile(new URL("../dashboard/assets/index.97b9144c.js", import.meta.url)), { headers: { "content-type": "text/javascript" } });
-      return new Response("protected snapshot");
+      if (["/assets/index.97b9144c.js", "/assets/index.email-constructor-v1.js"].includes(path)) return new Response(await readFile(new URL("../dashboard" + path, import.meta.url)), { headers: { "content-type": "text/javascript" } });
+      const html = path === "/email-constructor-v1/" ? "email-constructor-v1/index.html" : "index.html";
+      return new Response(await readFile(new URL("../dashboard/" + html, import.meta.url)), { headers: { "content-type": "text/html" } });
     } },
   };
   return {
@@ -76,13 +77,15 @@ test("Access key-fetch failures preserve a safe 503, without internal error refl
 test("audience array and clock skew remain compatible; protected GET/HEAD assets run after auth", async (t) => {
   const state = await authenticated(t, "positive-jwt");
   const token = await state.access.token({ aud: ["other", "fixture-aud"], exp: Math.floor(Date.now() / 1000) - 20, nbf: Math.floor(Date.now() / 1000) + 20 });
-  for (const path of ["/", "/assets/index.97b9144c.js", "/spa/", "/files/BACKUPS"]) {
+  for (const path of ["/", "/assets/index.97b9144c.js", "/assets/index.email-constructor-v1.js", "/spa/", "/files/BACKUPS"]) {
     assert.equal((await state.send(request(path), token)).status, 200);
     assert.equal((await state.send(request(path, { method: "HEAD" }), token)).status, 200);
   }
-  assert.equal(state.assets(), 8);
-  assert.equal((await state.send(request("/assets/index.97b9144c.js"), null)).status, 403);
-  assert.equal(state.assets(), 8);
+  assert.equal(state.assets(), 12); // Deep-link discovery plus the validated selected document.
+  for (const path of ["/assets/index.97b9144c.js", "/assets/index.email-constructor-v1.js", "/email-constructor-v1/"]) {
+    assert.equal((await state.send(request(path), null)).status, 403);
+  }
+  assert.equal(state.assets(), 12);
 });
 
 test("all disabled share/email paths and aliases fail before body reads", async (t) => {

@@ -1,0 +1,125 @@
+{
+  "algorithm": "sha256",
+  "files": {
+    "assets/AuthLayout.email-constructor-v1.js": {
+      "bytes": 358,
+      "originalBytes": 346,
+      "originalPaths": [
+        "assets/AuthLayout.db6e752c.js",
+        "spa/assets/AuthLayout.db6e752c.js"
+      ],
+      "originalSha256": "b5f5eaf25dfc166fd82988fb3fec42e696f94bde28bfe201e4943a5de92e97c1",
+      "sha256": "6cccf38efe2f1752d04572c151e3840346b1c92108125843d495ee140009beec"
+    },
+    "assets/EmailFilePage.email-constructor-v1.js": {
+      "bytes": 6148,
+      "originalBytes": 6136,
+      "originalPaths": [
+        "assets/EmailFilePage.8578c819.js",
+        "spa/assets/EmailFilePage.8578c819.js"
+      ],
+      "originalSha256": "59cf080d0ffae848aba35c72610c591db7feed35db911c71990ebb80a048a26d",
+      "sha256": "f6cf924dd54cf707e0213508f1249200fbe6d1c68bd895d8c69dd366e4370344"
+    },
+    "assets/ErrorNotFound.email-constructor-v1.js": {
+      "bytes": 578,
+      "originalBytes": 566,
+      "originalPaths": [
+        "assets/ErrorNotFound.1cad377e.js",
+        "spa/assets/ErrorNotFound.1cad377e.js"
+      ],
+      "originalSha256": "2cad3eb1bb505fd24405b5625f90745637fcebbf4f9bd76614b85fab9dbcee35",
+      "sha256": "32cfb14abbba46392b2a866613e494c07d4777da81c2bcd2adb3918cbd908460"
+    },
+    "assets/LoginPage.email-constructor-v1.js": {
+      "bytes": 2593,
+      "originalBytes": 2569,
+      "originalPaths": [
+        "assets/LoginPage.c1ee667f.js",
+        "spa/assets/LoginPage.c1ee667f.js"
+      ],
+      "originalSha256": "74d14c5c727b0ccffabc4baf31b1cdde735ce5f8be2cf5c539ed0ff67aa46650",
+      "sha256": "271f972adfab468c4d0837092738f2b11678925ba2b02e6aa7e298e4c0fe145f"
+    },
+    "assets/auth-store.email-constructor-v1.js": {
+      "bytes": 997,
+      "originalBytes": 985,
+      "originalPaths": [
+        "assets/auth-store.ba1aa298.js",
+        "spa/assets/auth-store.ba1aa298.js"
+      ],
+      "originalSha256": "3f62e5696ed8b8ea7a69a42ddbe5111132bab679d055d3f2fbbc3be94c802586",
+      "sha256": "fe3509163454fa53575012cec2b3162437a5c2d3fffea6faeb98b4a877b4248c"
+    },
+    "assets/auth.email-constructor-v1.js": {
+      "bytes": 315,
+      "originalBytes": 291,
+      "originalPaths": [
+        "assets/auth.315647f3.js",
+        "spa/assets/auth.315647f3.js"
+      ],
+      "originalSha256": "7d536eb488ce6623303a61a2f897ec4f7164f795b20abbdfcfd3aee62d0d707b",
+      "sha256": "e7b3eb8e2de9cedfe16f40e5458a1c6bb4d1a782271dea93d78e12a83337474a"
+    },
+    "assets/bus.email-constructor-v1.js": {
+      "bytes": 730,
+      "originalBytes": 718,
+      "originalPaths": [
+        "assets/bus.2c308485.js",
+        "spa/assets/bus.2c308485.js"
+      ],
+      "originalSha256": "6048f86039d9eb6c10e93193dfbc2ea7c551c033ecd64989c127af5be70eeb3f",
+      "sha256": "cc5446d18faf58b9390d1052d9da6fff6e49a4d50985d2abdd00302c3cafe4b1"
+    },
+    "assets/index.email-constructor-v1.js": {
+      "bytes": 1652122,
+      "originalBytes": 1651880,
+      "originalPaths": [
+        "assets/index.97b9144c.js",
+        "spa/assets/index.97b9144c.js"
+      ],
+      "originalSha256": "4ae881a8bbe7b75a9880279f2bd224d135cb854aca8d61586323711c57fbdaaa",
+      "sha256": "1939ae791ff4b05c92f93b857734ebf3356979c73c4eb427a0113f5ecab0613b"
+    },
+    "email-constructor-v1/index.html": {
+      "bytes": 2321,
+      "originalBytes": 2309,
+      "originalPaths": [
+        "index.html",
+        "spa/index.html"
+      ],
+      "originalSha256": "8134e3d37c08aaf1817a67b2d08d827823d2e3b4027ff6f011f5934ca4ae709a",
+      "sha256": "ff24bce3ff737908210c36c0a28768fbbbd69d2e802fd39660ebaeaa7c21c49d"
+    }
+  },
+  "notices": [
+    "EXPLORER-LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "source-notices.json",
+    "COMPONENTS.md",
+    "PROVENANCE.md"
+  ],
+  "operations": {
+    "basenameReplacements": {
+      "AuthLayout.db6e752c.js": "AuthLayout.email-constructor-v1.js",
+      "EmailFilePage.8578c819.js": "EmailFilePage.email-constructor-v1.js",
+      "ErrorNotFound.1cad377e.js": "ErrorNotFound.email-constructor-v1.js",
+      "LoginPage.c1ee667f.js": "LoginPage.email-constructor-v1.js",
+      "auth-store.ba1aa298.js": "auth-store.email-constructor-v1.js",
+      "auth.315647f3.js": "auth.email-constructor-v1.js",
+      "bus.2c308485.js": "bus.email-constructor-v1.js",
+      "index.97b9144c.js": "index.email-constructor-v1.js"
+    },
+    "constructor": {
+      "count": 1,
+      "from": "new PostalMime.default().parse(this.filedata)",
+      "to": "new PostalMime().parse(this.filedata)"
+    },
+    "mainPrefix": "/* Modified by TogetherWeOwn: PostalMime constructor integration and module references; original notices retained. */\n"
+  },
+  "originalFileCount": 56,
+  "originalManifestSha256": "9d0d73c0c2f4f4be8390c5389e75a4dc4131831460e56d3858bb4609b4303f3d",
+  "originalTotalBytes": 4937484,
+  "schema": "email-constructor-derivative-v1",
+  "sourceHead": "0e158f41a6b3ffd0c22ef990b0be2637891c6de2"
+}

@@ -1,8 +1,10 @@
 # r2-backup-console
 
-A native Cloudflare Worker API (`backup-console-api-v1`) and the byte-identical,
-MIT-licensed [R2-Explorer](https://github.com/G4brym/R2-Explorer) **1.2.0 dashboard**
-for the backup bucket. The adapter has **zero npm runtime dependencies**. It does
+A native Cloudflare Worker API (`backup-console-api-v1`) and an explicitly disclosed
+email-constructor derivative of the MIT-licensed
+[R2-Explorer](https://github.com/G4brym/R2-Explorer) **1.2.0 dashboard** for the backup
+bucket. The byte-identical upstream snapshot remains immutable provenance, not a
+claim about the served derivative. The adapter has **zero npm runtime dependencies**. It does
 not run Explorer's server, Chanfana, Zod, email receiver or generated API docs.
 Files remain ordinary R2 objects; there is no storage migration or client-side encryption.
 
@@ -37,14 +39,22 @@ workers.dev URL, route, custom domain or account identifier.
 ## Preview response policy — candidate, not a safety verdict
 
 Every response carries enforced CSP and `X-Content-Type-Options: nosniff` after
-metadata handling. Documents/static responses allow only the 16 exact pinned
-JavaScript URLs (root and supplied SPA subtree) and the original loader's SHA256
+metadata handling. Documents/static responses allow only the eight exact pinned
+`/assets/*.email-constructor-v1.js` URLs and the original loader's unchanged SHA256
 inline-script hash. No script `self`, inline handlers, eval, real workers, external
 scripts or optional GitHub update connection is allowed. Trusted script requests
 are fetched without redirects/ranges/conditional reuse, checked for JavaScript
-MIME and exact original SHA256, then served without altering their bytes. Only
-static script bytes are buffered; R2 objects remain streams. Static responses are
-no-store and retain policy on revalidation responses. HTTPS effective URL origins
+MIME, exact selected length and SHA256, then served without altering their bytes.
+Legacy root/SPA script URLs still return verified original bytes behind Access,
+but are no longer executable CSP sources. No derivative SPA script aliases exist.
+Navigation aliases and recognized SPA fallback HTML select the separately pinned
+`email-constructor-v1/index.html` via an internal `/email-constructor-v1/` asset
+fetch, without redirecting the browser URL; `Content-Location` discloses that
+identity. Document fetches also reject redirects, partial/cache responses, wrong
+MIME and changed bytes; HEAD validates the full representation before omitting its
+body. Only static scripts/HTML are buffered; R2 objects remain streams. Static
+responses are no-store, including errors. This does not repair already-open or
+cached documents retroactively. HTTPS effective URL origins
 are required outside the non-deploy loopback fixture; forwarded headers are not
 policy inputs.
 
@@ -134,6 +144,19 @@ artifact integrity, attribution and every asset digest. No install/build fetches
 `latest` assets or rebuilds the UI. Static/browser embedded-component review is
 separate from the npm graph and release-age policy; source subtraction alone is
 not a whole-advisory or deployed-remediation claim.
+
+`dashboard/email-constructor-v1/manifest.json` separately identifies nine served
+payloads (1,666,162 bytes): one main bundle correcting only
+`new PostalMime.default().parse(this.filedata)` to
+`new PostalMime().parse(this.filedata)`, seven referencing module copies and one
+HTML entrypoint. The main carries a modification notice. Its parser, inputs,
+options, sinks and error handling otherwise remain unchanged. The manifest records
+all source/derivative paths, lengths, hashes and deterministic byte operations;
+original `checksums.json`, provenance and all notices remain unchanged. This is
+not a parser update, sanitization fix or clean-SBOM claim. Exact-head Actions must
+qualify semantic email parsing/reopening and the full preview/client matrix.
+Missing PDF annotation imagery remains an explicit unqualified residual; this
+email correction adds no PDF assets or routes and does not waive image checks.
 
 Retained tools are exact: workers-types 5.20261101.1, TypeScript 7.0.2, Wrangler
 4.156.1 and their unchanged locked dependency objects. Use npm **11.19.0** with the

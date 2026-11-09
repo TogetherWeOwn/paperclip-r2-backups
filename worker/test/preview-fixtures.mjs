@@ -137,6 +137,18 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
         `);
         assert.equal(record.actual.pages.length, 2);
         assert.ok(record.actual.pages.every((page) => page.width > 0 && page.height > 0 && page.ink > 100), "Both PDF canvases contain visible glyphs");
+        record.actual.annotationImages = await evaluate(`
+          const images = () => [...document.querySelectorAll('#pdfvuer .annotationLayer img')];
+          await wait(() => images().length > 0 && images().every(image => image.complete), 'PDF annotation image responses');
+          return images().map(image => ({url:image.src, width:image.naturalWidth, height:image.naturalHeight}));
+        `);
+        assert.ok(record.actual.annotationImages.every(image => image.width > 0 && image.height > 0), "Every observed PDF annotation image must decode; no missing-icon waiver");
+        for (const image of record.actual.annotationImages) {
+          const response = evidence.network.findLast(response => response.url === image.url);
+          assert.ok(response, "Annotation image response was retained");
+          assert.equal(response.status, 200);
+          assert.equal(response.mimeType, "image/svg+xml");
+        }
       } else if (name.endsWith(".png")) {
         record.actual = await evaluate(`
           await wait(() => document.querySelector('.preview-image')?.naturalWidth === 1, 'Decoded local image');
@@ -153,6 +165,42 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
         assert.equal(record.actual.markupInterpreted, true, "Pinned renderer still interprets inert markup; never claim escaping");
         if (name.endsWith(".csv")) assert.ok(record.actual.html.includes("<table"));
         if (name.endsWith(".md")) assert.ok(record.actual.html.includes("<h1"));
+      }
+      if (name === "case-email.eml") {
+        for (const expected of ["Benign inline email", "fixture@example.invalid", "reader@example.invalid", "Unicode café Ω", "preview-marker", "last-line"]) {
+          assert.ok(record.actual.text.includes(expected), expected);
+        }
+        record.emailReady = await evaluate(`
+          const content = document.querySelector('.q-dialog .q-card__section.scroll');
+          return {spinner: !!content.querySelector('.q-spinner')};
+        `);
+        assert.equal(record.emailReady.spinner, false);
+        const reopenPoint = await evaluate(`
+          const close = [...document.querySelectorAll('.q-dialog button')].find(button => button.textContent.trim().toLowerCase().endsWith('close'));
+          if (!close) throw new Error('Preview close button missing');
+          close.click();
+          await wait(() => !document.querySelector('.q-dialog'), 'Closed email preview');
+          const row = [...document.querySelectorAll('tbody tr')].find(row => [...(row.querySelector('td')?.childNodes || [])]
+            .filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim() === 'case-email.eml');
+          if (!row) throw new Error('Email listing row missing on reopen');
+          row.scrollIntoView({block:'center'});
+          const rect = row.querySelector('td').getBoundingClientRect();
+          return {x:rect.x + Math.min(40, rect.width / 2), y:rect.y + rect.height / 2};
+        `);
+        for (const clickCount of [1, 2]) {
+          await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount, ...reopenPoint });
+          await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount, ...reopenPoint });
+        }
+        record.reopened = await evaluate(`
+          const content = () => document.querySelector('.q-dialog .q-card__section.scroll');
+          await wait(() => content()?.textContent.includes('preview-marker'), 'Reopened parsed email');
+          return {text:content().textContent, spinner:!!content().querySelector('.q-spinner'), path:location.pathname};
+        `);
+        assert.equal(record.reopened.text, record.actual.text);
+        assert.equal(record.reopened.spinner, false);
+        assert.equal(record.reopened.path, record.openedPath);
+        assert.deepEqual(evidence.emailParserErrors, []);
+        assert.deepEqual(evidence.exceptions, []);
       }
       // Exercise the real edit/cancel/save UI on one ordinary managed text object.
       if (name === "case-text.txt") {

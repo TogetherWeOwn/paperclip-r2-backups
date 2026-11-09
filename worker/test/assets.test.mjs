@@ -21,11 +21,48 @@ test("immutable dashboard snapshot, supplied spa layout and MIT license remain e
   }
   assert.equal(total, manifest.totalBytes);
   const all = (await readdir(dashboard, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile());
-  assert.equal(all.length, 62); // 56 originals plus six provenance/license/inventory files.
-  assert.equal(digest(await readFile(new URL("EXPLORER-LICENSE", dashboard))), "479887d33bb0120f0f8c21aab2062fb2434eba4c84b006edf255ceefe2d7e84c");
+  assert.equal(all.length, 72); // 56 originals, six evidence files, nine derivatives and one separate manifest.
+  for (const [path, hash] of Object.entries({
+    "checksums.json": "9d0d73c0c2f4f4be8390c5389e75a4dc4131831460e56d3858bb4609b4303f3d",
+    "PROVENANCE.md": "14c74775a834af1842e804dc253ebba7f591e601c556d99132d4326582f5a3b9",
+    "EXPLORER-LICENSE": "479887d33bb0120f0f8c21aab2062fb2434eba4c84b006edf255ceefe2d7e84c",
+    "COMPONENTS.md": "47be965620049e2d494deab9a20caa1388cedb38e9fb5979dab5529c35656ad6",
+    "source-notices.json": "002bebe9d815f68623774222495af586e8099e022734abd9347ba128297a5182",
+    "THIRD-PARTY-NOTICES.md": "06daf56649c06f63c03a6d903ac4cc054869a2b30b15d09014def3fca7b139d4",
+  })) assert.equal(digest(await readFile(new URL(path, dashboard))), hash, path);
   for (const path of Object.keys(manifest.files).filter((name) => !name.startsWith("spa/"))) {
     assert.equal(manifest.files[`spa/${path}`], manifest.files[path]);
   }
+});
+
+test("email derivative is exactly the selected constructor and complete module-reference transformation", async () => {
+  const encoded = await readFile(new URL("email-constructor-v1/manifest.json", dashboard));
+  assert.equal(encoded.length, 4871);
+  assert.equal(digest(encoded), "391ae96f4e26a6171cd587dc1ebc235b4fdd1588c00599ed80f2a4be3920fcdd");
+  const manifest = JSON.parse(encoded);
+  assert.equal(Object.keys(manifest.files).length, 9);
+  const { constructor: operation, mainPrefix, basenameReplacements } = manifest.operations;
+  assert.equal(Object.keys(basenameReplacements).length, 8);
+  let total = 0;
+  for (const [path, pin] of Object.entries(manifest.files)) {
+    const source = await readFile(new URL(pin.originalPaths[0], dashboard));
+    assert.equal(source.length, pin.originalBytes);
+    assert.equal(digest(source), pin.originalSha256);
+    assert.deepEqual(source, await readFile(new URL(pin.originalPaths[1], dashboard)));
+    let expected = source.toString("utf8");
+    if (path === "assets/index.email-constructor-v1.js") {
+      assert.equal(expected.split(operation.from).length - 1, 1);
+      expected = mainPrefix + expected.replace(operation.from, operation.to);
+    }
+    for (const [oldName, newName] of Object.entries(basenameReplacements)) expected = expected.split(oldName).join(newName);
+    const actual = await readFile(new URL(path, dashboard));
+    assert.deepEqual(actual, Buffer.from(expected), path);
+    assert.equal(actual.length, pin.bytes);
+    assert.equal(digest(actual), pin.sha256);
+    for (const oldName of Object.keys(basenameReplacements)) assert.equal(expected.includes(oldName), false, path + ": " + oldName);
+    total += actual.length;
+  }
+  assert.equal(total, 1_666_162);
 });
 
 test("source-candidate notices and exact original font attribution remain pinned", async () => {
