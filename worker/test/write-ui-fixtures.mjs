@@ -220,12 +220,17 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     const uploaded = state.objects.get(folder + child + uploadName);
     assert.deepEqual(Buffer.from(uploaded.bytes), uploadBytes);
     assert.deepEqual(uploaded.httpMetadata, { contentType: "text/plain" });
-    assert.deepEqual(uploaded.customMetadata, {});
+    assert.equal(Object.hasOwn(uploaded, "customMetadata"), false, "The pinned chooser omits custom metadata upload options");
+    const uploadedHead = await state.bucket.head(folder + child + uploadName);
+    assert.deepEqual(uploadedHead.customMetadata, {}, "R2 object details normalize omitted custom metadata");
+    assert.deepEqual(uploadedHead.httpMetadata, { contentType: "text/plain" });
+    assert.equal(uploadedHead.size, uploadBytes.length);
     assert.deepEqual(mutations(), [...afterDelete, ["put", folder + child],
       ["put", folder + child + empty], ["put", folder + child + uploadName]]);
     retained(original);
-    record.upload = { name: uploadName, bytes: uploadBytes.length, httpMetadata: uploaded.httpMetadata,
-      customMetadata: uploaded.customMetadata, exactBody: true };
+    record.upload = { name: uploadName, bytes: uploadBytes.length, httpMetadata: uploadedHead.httpMetadata,
+      customMetadataOptionPresent: Object.hasOwn(uploaded, "customMetadata"),
+      customMetadata: uploadedHead.customMetadata, exactBody: true };
     await snapshot("file-upload");
     record.status = "pass";
   } catch (error) {
