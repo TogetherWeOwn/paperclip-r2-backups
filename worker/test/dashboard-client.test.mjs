@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createServer } from "node:http";
 import { Readable } from "node:stream";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,12 +16,12 @@ const root = new URL("../dashboard/", import.meta.url);
 
 async function launchChrome(profile, evidence) {
   const startup = evidence.startup = {
-    deadlineMs: 15_000, status: "starting", stderr: "", exitCode: null, signalCode: null,
+    deadlineMs: 15_000, status: "starting", stdout: "", stderr: "", exitCode: null, signalCode: null,
   };
   const chrome = spawn(process.env.CHROME_BIN || "google-chrome", [
     "--headless=new", "--no-first-run", "--disable-background-networking",
     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", `--user-data-dir=${profile}`, "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ], { stdio: ["ignore", "pipe", "pipe"] });
   const started = performance.now();
   try {
     const url = await new Promise((resolve, reject) => {
@@ -35,17 +36,42 @@ async function launchChrome(profile, evidence) {
         startup.signalCode = signal;
         finish(reject, new Error(`Chrome exited before qualification: ${startup.stderr}`));
       });
-      chrome.stderr.on("data", (chunk) => {
-        startup.stderr = (startup.stderr + chunk).slice(-8192);
-        const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(startup.stderr);
-        if (match) finish(resolve, match[1]);
-      });
+      for (const stream of ["stdout", "stderr"]) {
+        chrome[stream].on("data", (chunk) => {
+          startup[stream] = (startup[stream] + chunk).slice(-8192);
+          const match = /DevTools listening on (ws:\/\/[^\s]+)/.exec(startup[stream]);
+          if (match) finish(resolve, match[1]);
+        });
+      }
     });
     startup.status = "ready";
     return { chrome, url };
   } catch (error) {
     startup.status = "failed";
     startup.error = String(error).slice(0, 1024);
+    startup.failureElapsedMs = Math.round(performance.now() - started);
+    // Inspect a silent startup before terminating it. Exclude arguments and the
+    // environment; only retain this browser's bounded process tree and wait state.
+    if (chrome.pid) {
+      try {
+        const { stdout } = await promisify(execFile)("ps", ["-eo", "pid=,ppid=,stat=,etime=,time=,wchan:32=,comm="], {
+          timeout: 1000, maxBuffer: 262144,
+        });
+        const rows = stdout.trim().split("\n").map((line) => {
+          const [pid, ppid, stat, elapsed, cpu, wait, ...command] = line.trim().split(/\s+/);
+          return { pid: Number(pid), ppid: Number(ppid), stat, elapsed, cpu, wait, command: command.join(" ").slice(0, 128) };
+        });
+        const selected = new Set([chrome.pid]);
+        for (let depth = 0; depth < 8 && selected.size < 32; depth++) {
+          for (const row of rows) {
+            if (selected.has(row.ppid) && selected.size < 32) selected.add(row.pid);
+          }
+        }
+        startup.processes = rows.filter((row) => selected.has(row.pid)).slice(0, 32);
+      } catch (diagnosticError) {
+        startup.processDiagnosticError = String(diagnosticError).slice(0, 256);
+      }
+    }
     if (chrome.exitCode === null && chrome.signalCode === null && chrome.pid) {
       const exited = once(chrome, "exit");
       chrome.kill("SIGKILL");
