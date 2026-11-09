@@ -68,7 +68,14 @@ export function mockBucket() {
         async complete(parts) {
           calls.push(["complete", parts]);
           const upload = pending.get(uploadId);
-          const value = { bytes: Uint8Array.from(parts.flatMap((part) => [...(upload?.parts.get(part.partNumber) ?? [])])), ...upload?.options };
+          const chunks = parts.map((part) => upload?.parts.get(part.partNumber) ?? new Uint8Array());
+          const bytes = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
+          let offset = 0;
+          for (const chunk of chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.length;
+          }
+          const value = { bytes, ...upload?.options };
           objects.set(key, value);
           return details(key, value);
         },

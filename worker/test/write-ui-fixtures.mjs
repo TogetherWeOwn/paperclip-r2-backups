@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -238,6 +240,75 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
       customMetadataOption: uploaded.customMetadata === undefined ? "undefined" : uploaded.customMetadata,
       customMetadata: uploadedHead.customMetadata, exactBody: true };
     await snapshot("file-upload");
+
+    const client = await readFile(new URL("../dashboard/assets/index.preview-layout-v1.js", import.meta.url), "utf8");
+    assert.ok(client.includes("Y=95*1024*1024;try{if(w.size>Y)"), "Use the unchanged pinned chooser threshold");
+    const partBytes = 95 * 1024 * 1024;
+    const largeName = "multipart-café.txt";
+    const largeKey = folder + child + largeName;
+    const largePath = join(uploadDirectory, largeName);
+    const totalBytes = partBytes + 37;
+    const input = await open(largePath, "wx");
+    try {
+      await input.truncate(totalBytes);
+      for (const [offset, marker] of [[0, "start café"], [partBytes - 8, "boundary-Ω"], [totalBytes - 12, "end-marker"]]) {
+        await input.write(Buffer.from(marker), 0, Buffer.byteLength(marker), offset);
+      }
+    } finally {
+      await input.close();
+    }
+    const sourceHash = createHash("sha256");
+    for await (const chunk of createReadStream(largePath)) sourceHash.update(chunk);
+    const sha256 = sourceHash.digest("hex");
+    const callStart = state.calls.length;
+    const requestStart = evidence.requests.length;
+    record.multipart = { status: "unverified", name: largeName, bytes: totalBytes, partBytes, sha256 };
+    await cdp.call("Page.setInterceptFileChooserDialog", { enabled: true });
+    try {
+      const chooser = cdp.event("Page.fileChooserOpened");
+      await newMenu("Upload Files");
+      const { backendNodeId, mode } = await chooser;
+      assert.equal(mode, "selectMultiple");
+      await cdp.call("DOM.setFileInputFiles", { backendNodeId, files: [largePath] });
+      await names([empty, uploadName, largeName]);
+      await evaluate("await wait(() => document.body.innerText.includes('Files Uploaded!'), 'Completed multipart notification');");
+    } finally {
+      await cdp.call("Page.setInterceptFileChooserDialog", { enabled: false });
+    }
+    const multipartCalls = state.calls.slice(callStart).filter(([operation]) => ["create", "resume", "part", "complete", "put", "delete"].includes(operation));
+    record.multipart.operations = multipartCalls.map(([operation]) => operation);
+    assert.deepEqual(record.multipart.operations, ["create", "resume", "part", "resume", "part", "resume", "complete"]);
+    const [[, createdKey, options], [, resumedKey, uploadId]] = multipartCalls;
+    assert.equal(createdKey, largeKey);
+    assert.equal(resumedKey, largeKey);
+    assert.deepEqual(options.httpMetadata, { contentType: "text/plain" });
+    assert.equal(options.customMetadata, undefined);
+    for (const [, key, id] of multipartCalls.filter(([operation]) => operation === "resume")) {
+      assert.equal(key, largeKey);
+      assert.equal(id, uploadId);
+    }
+    const parts = state.pending.get(uploadId).parts;
+    assert.deepEqual([...parts.keys()], [1, 2]);
+    assert.deepEqual([...parts.values()].map(bytes => bytes.length), [partBytes, 37]);
+    assert.deepEqual(multipartCalls.at(-1)[1], [{ partNumber: 1, etag: "part-1" }, { partNumber: 2, etag: "part-2" }]);
+    const stored = state.objects.get(largeKey);
+    assert.equal(stored.bytes.length, totalBytes);
+    assert.equal(createHash("sha256").update(stored.bytes).digest("hex"), sha256);
+    const largeHead = await state.bucket.head(largeKey);
+    assert.equal(largeHead.size, totalBytes);
+    assert.deepEqual(largeHead.httpMetadata, { contentType: "text/plain" });
+    assert.deepEqual(largeHead.customMetadata, {});
+    const requests = evidence.requests.slice(requestStart).map(({ url }) => new URL(url))
+      .filter(url => url.pathname.startsWith("/api/buckets/BACKUPS/multipart/"));
+    assert.deepEqual(requests.map(url => url.pathname.split("/").at(-1)), ["create", "upload", "upload", "complete"]);
+    for (const url of requests.slice(0, 3)) assert.equal(Buffer.from(url.searchParams.get("key"), "base64").toString(), largeKey);
+    assert.deepEqual(requests.slice(1, 3).map(url => url.searchParams.get("partNumber")), ["1", "2"]);
+    for (const url of requests.slice(1, 3)) assert.equal(url.searchParams.get("uploadId"), uploadId);
+    retained(original);
+    record.multipart = { ...record.multipart, status: "pass", partSizes: [partBytes, 37],
+      completedParts: multipartCalls.at(-1)[1], httpMetadata: largeHead.httpMetadata,
+      customMetadata: largeHead.customMetadata, exactBody: true };
+    await snapshot("multipart-upload");
     record.status = "pass";
   } catch (error) {
     record.status = "fail";
