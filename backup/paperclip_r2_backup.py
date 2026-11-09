@@ -204,6 +204,12 @@ class Rclone:
         optional managed prefix, a missing bucket or empty response is unknown.
         Never accept a partial command result or coerce malformed sizes to zero.
         """
+        # Global rclone options can silently filter an otherwise valid listing.
+        # Allow remote configuration, not inherited command defaults (including
+        # future filtering options). Do not log their possibly sensitive values.
+        if any(name.startswith("RCLONE_") and name != "RCLONE_CONFIG" and
+               not name.startswith("RCLONE_CONFIG_") for name in os.environ):
+            raise BackupError("whole-bucket inventory refuses rclone environment options")
         out = self._run(["lsjson", "-R", "--files-only", "--no-mimetype",
                          "--no-modtime", self._target("")])
         try:
@@ -486,6 +492,8 @@ def compute_retention(cfg: Config, existing: dict, now: dt.datetime,
     for prefix in DELETABLE_PREFIXES:
         plan = plan_retention(existing[prefix], now, cfg.retention_for(prefix),
                               remaining, upload_ok, prefix)
+        for key in plan.delete:
+            assert_managed(key, (prefix,))
         remaining -= len(plan.delete)
         plans[prefix] = plan
     return plans
@@ -564,6 +572,18 @@ def projected_with_status(status: dict, existing: dict, incoming: list[Obj],
         total = updated
 
 
+def inventory_state(rc) -> tuple[int, dict]:
+    """Keep managed retention inputs, not the full unrelated-object inventory."""
+    existing = {p: [] for p in MANAGED_PREFIXES}
+    bucket_bytes = 0
+    for obj in rc.bucket_inventory():
+        bucket_bytes += obj.size
+        prefix = obj.key.split("/", 1)[0] + "/"
+        if prefix in existing:
+            existing[prefix].append(obj)
+    return bucket_bytes, existing
+
+
 def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
     now = now.astimezone(dt.timezone.utc)
     clock_start = snapshots.utc_now() if not dry_run else now
@@ -577,9 +597,7 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
     tmp_root = None
     code = EXIT_ERROR
     try:
-        objects = rc.bucket_inventory()
-        bucket_bytes = sum(o.size for o in objects)
-        existing = {p: [o for o in objects if o.key.startswith(p)] for p in MANAGED_PREFIXES}
+        bucket_bytes, existing = inventory_state(rc)
         managed = sum(o.size for objs in existing.values() for o in objs)
         status["managed_bytes"] = managed
         status["bucket_bytes"] = bucket_bytes
@@ -667,6 +685,16 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
             if clock_start < invoked_at:
                 raise BackupError("snapshot clock moved backward since invocation")
             snapshots.check_clock(clock_start, start_tick, now, snapshots.time.monotonic())
+
+        # Refresh after capture, immediately before admission. The shared CLI
+        # lock does not reserve capacity against independent external writers.
+        bucket_bytes, existing = inventory_state(rc)
+        managed = sum(o.size for objs in existing.values() for o in objs)
+        status["managed_bytes"] = managed
+        status["bucket_bytes"] = bucket_bytes
+        current_keys = {o.key for objs in existing.values() for o in objs}
+        if any(o.key in current_keys for o in incoming_objs):
+            raise BackupError("pending backup key appeared during capture; retry without overwriting")
 
         # c) cap guard against the projected size: current + incoming - planned deletions
         incoming = sum(o.size for o in incoming_objs)
