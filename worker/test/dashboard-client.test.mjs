@@ -11,8 +11,9 @@ import { join } from "node:path";
 import { stripTypeScriptTypes } from "node:module";
 import worker from "../src/index.ts";
 import { mockBucket, signedAccess, nodeRequest } from "./fixtures.mjs";
-import { seedPreviews, qualifyPreviews } from "./preview-fixtures.mjs";
+import { seedPreviews, seedMediaPreviews, qualifyPreviews } from "./preview-fixtures.mjs";
 import { seedFullEmails, qualifyFullEmails } from "./email-fixtures.mjs";
+import { seedListing, qualifyListing } from "./listing-fixtures.mjs";
 
 const root = new URL("../dashboard/", import.meta.url);
 
@@ -166,6 +167,7 @@ test("the exact selected layout derivative exercises all enabled API contracts a
   t.mock.method(globalThis, "fetch", async (url, options) => String(url) === "https://dashboard-client.cloudflareaccess.com/cdn-cgi/access/certs" ? Response.json({ keys: [access.jwk] }) : realFetch(url, options));
   const state = mockBucket();
   const previews = await seedPreviews(state);
+  const listingPages = seedListing(state);
   seedFullEmails(state);
   state.objects.set(".hidden", { bytes: new TextEncoder().encode("hidden") });
   const manifest = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
@@ -387,6 +389,7 @@ test("the exact selected layout derivative exercises all enabled API contracts a
     }
     await qualifyPreviews(cdp, origin, previews, browserEvidence, mode => { pdfImageMode = mode; });
     await qualifyFullEmails(cdp, origin, browserEvidence);
+    await qualifyListing(cdp, origin, browserEvidence, listingPages);
     assert.deepEqual(state.calls.filter(([operation, key]) => ["put", "delete", "create", "resume"].includes(operation) && key.startsWith(".r2-explorer/")), [], "Read-only stored-email qualification must not write the unmanaged hidden prefix");
     assert.deepEqual(failures.filter(failure => failure.pdfImageMode === "normal"), [], "Ordinary click-driven previews must not introduce failed API/static requests");
     for (const failure of failures.filter(failure => failure.pdfImageMode !== "normal")) {
@@ -396,6 +399,25 @@ test("the exact selected layout derivative exercises all enabled API contracts a
     }
     assert.deepEqual(browserEvidence.exceptions, [], "Click-driven previews must not introduce application runtime exceptions");
     assert.equal(new TextDecoder().decode(state.objects.get("db/qualification/case-text.txt").bytes), "saved UI marker");
+    // An unavailable encoder must fail closed without suppressing independent
+    // API, UI, email and PDF evidence. No optional/skip path for media acceptance.
+    browserEvidence.mediaGeneration = { status: "unverified" };
+    const mediaEvidence = { ...browserEvidence, previews: [] };
+    try {
+      const media = await seedMediaPreviews(state);
+      browserEvidence.mediaGeneration.status = "pass";
+      await qualifyPreviews(cdp, origin, media, mediaEvidence, mode => { pdfImageMode = mode; }, { onlyRequested: true });
+    } catch (error) {
+      if (browserEvidence.mediaGeneration.status !== "pass") {
+        browserEvidence.mediaGeneration.status = "fail";
+        browserEvidence.mediaGeneration.error = String(error).slice(0, 1024);
+      }
+      throw error;
+    } finally {
+      browserEvidence.mediaPreviews = mediaEvidence.previews;
+    }
+    assert.deepEqual(browserEvidence.exceptions, [], "Media must not introduce application runtime exceptions");
+    assert.deepEqual(failures.filter(failure => failure.pdfImageMode === "normal"), [], "Media must not introduce failed API/static requests");
   } finally {
     await mkdir(new URL("../artifacts/", import.meta.url), { recursive: true });
     if (cdp) {

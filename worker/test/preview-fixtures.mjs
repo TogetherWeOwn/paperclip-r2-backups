@@ -41,13 +41,21 @@ function ordinaryPdf() {
   return Buffer.from(pdf);
 }
 
-export async function seedPreviews(state) {
+export async function seedMediaPreviews(state) {
   const artifacts = new URL("../artifacts/previews/", import.meta.url);
   await mkdir(artifacts, { recursive: true });
   const media = await mediaFixtures(artifacts);
-  for (const [name, bytes, contentType] of media) mediaObjects.set(name, { key: folder + name, bytes, contentType });
+  for (const [name, bytes, contentType] of media) {
+    mediaObjects.set(name, { key: folder + name, bytes, contentType });
+    state.objects.set(folder + name, { bytes, httpMetadata: { contentType } });
+  }
+  return media.map(([name]) => name);
+}
+
+export async function seedPreviews(state) {
+  const artifacts = new URL("../artifacts/previews/", import.meta.url);
+  await mkdir(artifacts, { recursive: true });
   const corpus = [
-    ...media,
     ["case-text.txt", text, "text/plain"],
     ["case-json.json", JSON.stringify({ message: text }), "application/json"],
     ["case-html.html", text, "text/html"],
@@ -110,7 +118,7 @@ function acceptAnnotationImages(images, responses, expectedUrl) {
   }
 }
 
-export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageMode, { onlyEmbedded = false, artifactDirectory = "previews" } = {}) {
+export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageMode, { onlyEmbedded = false, onlyRequested = false, artifactDirectory = "previews" } = {}) {
   const artifacts = new URL(`../artifacts/${artifactDirectory}/`, import.meta.url);
   await mkdir(artifacts, { recursive: true });
   evidence.previews = [];
@@ -135,7 +143,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
     ...names.map(name => ({ name, prefix: folder, mode: "normal", id: name })),
     ...["", "instance/qualification/", "db/???/"].map((prefix, index) => ({ name: "case-pdf.pdf", prefix, mode: "normal", id: `pdf-folder-${index}` })),
     ...["missing", "corrupt", "mime", "redirect", "html"].map(mode => ({ name: "case-pdf.pdf", prefix: folder, mode, id: `pdf-control-${mode}` })),
-  ].filter(record => !onlyEmbedded || record.name === "case-embedded.pdf");
+  ].filter(record => (!onlyEmbedded || record.name === "case-embedded.pdf") && (!onlyRequested || names.includes(record.id)));
   for (const { name, prefix, mode, id } of cases) {
     // Match Vue Router's parameter encoder: slash only, not encodeURIComponent's
     // %3D/%2B aliases. Root is the client's single-space sentinel.
