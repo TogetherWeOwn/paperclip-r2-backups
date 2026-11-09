@@ -67,6 +67,9 @@ export async function qualifyFullEmails(cdp, origin, evidence) {
     const record = { id, status: "unverified" };
     evidence.fullEmails.push(record);
     const networkStart = evidence.network.length;
+    const requestStart = evidence.requests.length;
+    const failureStart = evidence.networkFailures.length;
+    const consoleStart = evidence.console.length;
     try {
       const loaded = cdp.event("Page.loadEventFired");
       await cdp.call("Page.navigate", { url: `${origin}/BACKUPS/email/inbox/${Buffer.from(id + ".json").toString("base64")}` });
@@ -118,7 +121,18 @@ export async function qualifyFullEmails(cdp, origin, evidence) {
         assert.ok(record.frame.text.includes("Unicode café Ω"));
         for (const control of ["inlineDenied", "handlerDenied", "evalDenied"]) assert.equal(record.frame[control], true, control);
         assert.equal(record.frame.remote.width, 0, "Remote email imagery remains intentionally denied");
-        assert.ok(record.frame.violations.some(event => event.directive === "img-src" && event.disposition === "enforce" && event.blocked === record.frame.remote.url), "Remote denial must be enforced CSP, not a DNS failure");
+        // The srcdoc image can be blocked before the document-start DOM listener
+        // observes it. Correlate engine events instead of accepting a blank image.
+        const request = evidence.requests.slice(requestStart).find(event => event.url === record.frame.remote.url);
+        assert.ok(request, "Remote image request must be identified");
+        record.remoteDenial = {
+          request,
+          failure: evidence.networkFailures.slice(failureStart).find(event => event.requestId === request.requestId),
+          console: evidence.console.slice(consoleStart).filter(entry => entry.source === "security" && entry.text.includes(record.frame.remote.url)),
+        };
+        assert.equal(record.remoteDenial.failure?.type, "Image");
+        assert.equal(record.remoteDenial.failure?.blockedReason, "csp", "Remote denial must be enforced CSP, not a DNS failure");
+        assert.ok(record.remoteDenial.console.some(entry => entry.text.includes("img-src") && entry.text.includes("The action has been blocked.")));
         assert.ok(!evidence.network.slice(networkStart).some(response => response.url === record.frame.remote.url));
         assert.equal(record.frame.local.height, 1);
         assert.ok(!record.frame.srcdoc.includes("cid:fixture-image"));

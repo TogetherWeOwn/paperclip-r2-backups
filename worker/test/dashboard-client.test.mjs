@@ -229,8 +229,10 @@ test("the exact selected layout derivative exercises all enabled API contracts a
     await cdp.call("Network.enable");
     await cdp.call("Network.setCacheDisabled", { cacheDisabled: true });
     browserEvidence.redirects = [];
+    browserEvidence.requests = [];
     browserEvidence.networkFailures = [];
     cdp.on("Network.requestWillBeSent", ({ requestId, request, redirectResponse }) => {
+      browserEvidence.requests.push({ requestId, url: request.url });
       if (redirectResponse) browserEvidence.redirects.push({ requestId, from: redirectResponse.url, to: request.url, status: redirectResponse.status });
     });
     cdp.on("Network.loadingFailed", event => browserEvidence.networkFailures.push(event));
