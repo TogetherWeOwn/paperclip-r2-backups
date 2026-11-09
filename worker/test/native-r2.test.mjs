@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { mkdir, writeFile } from "node:fs/promises";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { encode } from "./fixtures.mjs";
@@ -20,7 +21,12 @@ async function runtime() {
             const object = await env.BACKUPS.put('db/native', 'native body', options);
             return Response.json(object);
           }
-          return consoleApi(request, env, ['*']);
+          const response = await consoleApi(request, env, ['*']);
+          // Keep application headers inspectable independently of workerd's HTTP transport.
+          if (request.method === 'GET' && response.headers.has('content-length')) {
+            response.headers.set('x-fixture-content-length', response.headers.get('content-length'));
+          }
+          return response;
         }};
       `,
       resolveDir: fileURLToPath(new URL("../", import.meta.url)),
@@ -52,9 +58,18 @@ test("native R2 primitive dictionary conversions and Date/cacheExpiry match adap
     assert.deepEqual(actual.customMetadata, baseline.customMetadata);
     assert.deepEqual(actual.httpMetadata, baseline.httpMetadata);
     const download = await instance.dispatchFetch(`https://fixture.test${base}/${encode("db/native")}`);
-    assert.equal(download.headers.get("content-length"), "11");
+    const text = await download.text();
+    await mkdir(new URL("../artifacts/", import.meta.url), { recursive: true });
+    await writeFile(new URL("../artifacts/native-metadata.json", import.meta.url), JSON.stringify({
+      baseline, actual, download: { status: download.status, headers: Object.fromEntries(download.headers), text },
+    }, null, 2));
+    assert.equal(download.status, 200);
+    // A streaming Response's manual Content-Length can be dropped at the native transport.
+    // Assert the adapter's header in-isolate, and independently assert received body bytes.
+    assert.equal(download.headers.get("x-fixture-content-length"), "11");
+    assert.equal(Buffer.byteLength(text), 11);
     assert.equal(download.headers.get("expires"), new Date(iso).toUTCString());
-    assert.equal(await download.text(), "native body");
+    assert.equal(text, "native body");
   } finally {
     await instance.dispose();
   }

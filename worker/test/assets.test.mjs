@@ -21,10 +21,24 @@ test("immutable dashboard snapshot, supplied spa layout and MIT license remain e
   }
   assert.equal(total, manifest.totalBytes);
   const all = (await readdir(dashboard, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile());
-  assert.equal(all.length, 59); // 56 originals plus license, provenance and checksums.
+  assert.equal(all.length, 62); // 56 originals plus six provenance/license/inventory files.
   assert.equal(digest(await readFile(new URL("EXPLORER-LICENSE", dashboard))), "479887d33bb0120f0f8c21aab2062fb2434eba4c84b006edf255ceefe2d7e84c");
   for (const path of Object.keys(manifest.files).filter((name) => !name.startsWith("spa/"))) {
     assert.equal(manifest.files[`spa/${path}`], manifest.files[path]);
+  }
+});
+
+test("source-candidate notices and exact original font attribution remain pinned", async () => {
+  const bytes = await readFile(new URL("source-notices.json", dashboard));
+  assert.equal(digest(bytes), "002bebe9d815f68623774222495af586e8099e022734abd9347ba128297a5182");
+  assert.equal(digest(await readFile(new URL("THIRD-PARTY-NOTICES.md", dashboard))), "06daf56649c06f63c03a6d903ac4cc054869a2b30b15d09014def3fca7b139d4");
+  const source = JSON.parse(bytes);
+  assert.equal(source.sourceCommit, "d8fefacf3eef29dcd9eb12bd911f2e8fa7da692e");
+  assert.equal(source.originalLockSha256, "eb6b47517dd2571a28e7c83ce5fbbe2f478e47c3ad640c4380374b40d014b1cf");
+  assert.equal(source.packages.length, 28);
+  assert.equal(source.fontByteMatches.length, 8);
+  for (const font of source.fontByteMatches) {
+    assert.equal(digest(await readFile(new URL(font.dashboardPath, dashboard))), font.sha256);
   }
 });
 

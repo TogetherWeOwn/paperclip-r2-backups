@@ -13,7 +13,8 @@ The repository's native Worker adapter is versioned independently as
 - Original asset count: **56 files**, **4,937,484 bytes**. This includes the
   supplied `spa/` subtree; no minification, rebuild, deduplication or redesign.
 - `checksums.json` covers every original asset by relative path and SHA256.
-  This provenance file, checksums and license are not part of that original count.
+  Provenance, checksums, license, `COMPONENTS.md`, `source-notices.json` and
+  `THIRD-PARTY-NOTICES.md` are six additional evidence files, not original assets.
 
 No install/build downloads dashboard assets, and no asset is fetched as `latest`.
 The native npm release-age policy does not cover vendored files: tarball integrity,

@@ -97,18 +97,26 @@ jobs:
       - name: Clean install with release-age policy and hooks refused
         run: npm ci --no-audit --no-fund
       - name: Verify native locked graph without resolution
-        run: npm ls --package-lock-only --all
+        run: |
+          mkdir -p artifacts
+          npm ls --package-lock-only --all --json > artifacts/locked-graph.json
+      - name: Preserve exact installed tool distributions for inspection
+        env:
+          EVIDENCE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node test/record-build-evidence.mjs
       - name: Typecheck the Worker
         run: npm run typecheck
+      - name: Non-deploy Worker bundle and module metadata
+        run: npm run build -- --metafile=artifacts/worker-metafile.json
       - name: Finite-work, native R2, policy and real pinned-dashboard fixtures
         run: npm test
-      - name: Non-deploy Worker bundle
-        run: npm run build
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: worker-adapter-client-evidence
-          path: worker/artifacts/*
+          path: |
+            worker/artifacts/
+            worker/dist/
           retention-days: 14
           if-no-files-found: warn
   ci-ok:
