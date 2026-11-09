@@ -197,7 +197,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
               const font = entry.data;
               const paths = entries.filter(([key]) => key.startsWith(font.loadedName + '_path_')).map(([, path]) => path.data);
               return {id, loadedName:font.loadedName, missingFile:font.missingFile, disableFontFace:font.disableFontFace,
-                isEvalSupported:font.isEvalSupported, bytes:font.data?.length,
+                isEvalSupported:font.isEvalSupported, dataReleased:font.data === null,
                 glyphs:Object.values(font.compiledGlyphs).map(glyph => glyph.toString()),
                 numericPaths:paths.length > 0 && paths.every(path => path.every(operation =>
                   !operation.args || operation.args.every(argument => typeof argument === 'number' && Number.isFinite(argument))))};
@@ -208,18 +208,22 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
               text.push((await page.getTextContent()).items.map(item => item.str).join(''));
             }
             await document.fonts.ready;
-            return {fonts, text, fakeWorker:!!worker && worker._webWorker === null && worker.port.constructor.name === 'LoopbackPort',
+            return {fonts, text, fontExtraProperties:documentProxy._transport._params.fontExtraProperties,
+              fakeWorker:!!worker && worker._webWorker === null && worker.port.constructor.name === 'LoopbackPort',
               fontFaces:[...document.fonts].filter(font => fonts.some(entry => font.family.replaceAll('"', '') === entry.loadedName))
                 .map(font => ({family:font.family, status:font.status}))};
           `);
           assert.equal(record.fonts.fakeWorker, true, "The real PDF loading task uses the bundled loopback worker");
           assert.deepEqual(record.fonts.text, ["Embedded Roboto 0123456789", "0123456789"]);
           assert.ok(record.fonts.fonts.length > 0);
+          assert.equal(record.fonts.fontExtraProperties, false, "No test override retains font debug data");
           assert.ok(record.fonts.fontFaces.length > 0 && record.fonts.fontFaces.every(font => font.status === "loaded"), "Embedded font faces actually load");
           for (const font of record.fonts.fonts) {
             assert.equal(font.missingFile, false);
             assert.equal(font.disableFontFace, false);
-            assert.ok(font.bytes > 0);
+            // PDF.js releases raw font data after binding unless debug extras are enabled.
+            // Loaded native faces and painted embedded text above prove the normal path.
+            assert.equal(font.dataReleased, true);
             assert.equal(font.isEvalSupported, true, "No test override of the renderer's eval option");
             assert.equal(font.numericPaths, true);
             assert.ok(font.glyphs.length >= 10, "All ten numeric glyph paths were compiled by normal rendering");
