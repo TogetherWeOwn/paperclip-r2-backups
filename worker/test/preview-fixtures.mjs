@@ -3,6 +3,7 @@ import { gzipSync } from "node:zlib";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { embeddedPdf, cachedPdfProbe, pdfComponentsExpression } from "./pdf-fixtures.mjs";
+import { inlineEmails } from "./email-fixtures.mjs";
 
 const folder = "db/qualification/";
 const text = "Unicode café Ω\n<b>preview-marker</b>\nlast-line";
@@ -48,6 +49,7 @@ export async function seedPreviews(state) {
     ["case-fallback.xyz", text, "application/octet-stream"],
     ["case-log.log.gz", gzipSync(text), "application/gzip"],
     ["case-email.eml", email, "message/rfc822"],
+    ...[...inlineEmails].map(([name, body]) => [name, body, "message/rfc822"]),
     ["case-image.png", Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO1sAAAAASUVORK5CYII=", "base64"), "image/png"],
     ["case-pdf.pdf", ordinaryPdf(), "application/pdf"],
     ["case-embedded.pdf", await embeddedPdf(), "application/pdf"],
@@ -355,7 +357,16 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
           return {text: content().textContent, markupInterpreted: !!content().querySelector('b'), html: content().innerHTML, path: location.pathname};
         `);
         assert.ok(record.actual.text.includes("preview-marker"));
-        assert.equal(record.actual.markupInterpreted, true, "Pinned renderer still interprets inert markup; never claim escaping");
+        assert.equal(record.actual.markupInterpreted, name !== "case-html-email.eml", "Record actual plain-text markup interpretation versus HTML-to-text conversion; never claim escaping");
+        if (inlineEmails.has(name)) {
+          const subject = name === "case-html-email.eml" ? "Benign HTML email" : "Benign multipart email";
+          for (const expected of [subject, "fixture@example.invalid", "reader@example.invalid", "Unicode café Ω", "last-line"]) {
+            assert.ok(record.actual.text.includes(expected), expected);
+          }
+          if (name === "case-multipart-email.eml") {
+            for (const expected of ["2 attachment(s)", "pixel.png", "note.txt"]) assert.ok(record.actual.text.includes(expected), expected);
+          }
+        }
         if (name.endsWith(".csv")) assert.ok(record.actual.html.includes("<table"));
         if (name.endsWith(".md")) assert.ok(record.actual.html.includes("<h1"));
       }
@@ -431,18 +442,19 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
             .map(image => ({url:image.src, complete:image.complete, width:image.naturalWidth})),
           violations:window.__policyEvents};
       `);
-      if (name === "case-email.eml") {
+      if (name.endsWith(".eml")) {
+        const expectedEmail = inlineEmails.get(name) || email;
         record.parserErrors = evidence.emailParserErrors;
         try {
           const path = `/api/buckets/BACKUPS/${Buffer.from(folder + name).toString("base64")}`;
           const response = evidence.network.findLast(response => decodeURIComponent(new URL(response.url).pathname) === path);
           assert.ok(response, "Email object response was observed");
           const body = await cdp.call("Network.getResponseBody", { requestId: response.requestId });
-          // Only the authored 218-byte text fixture is retrieved, never an arbitrary
+          // Only authored small email fixtures are retrieved, never an arbitrary
           // object stream. Retain equality/count, not the transferred content.
           const bytes = Buffer.from(body.body, body.base64Encoded ? "base64" : "utf8");
           record.transfer = {status:response.status, mimeType:response.mimeType,
-            bytes:bytes.length, expectedBytes:Buffer.byteLength(email), equal:bytes.equals(Buffer.from(email))};
+            bytes:bytes.length, expectedBytes:Buffer.byteLength(expectedEmail), equal:bytes.equals(Buffer.from(expectedEmail))};
           assert.equal(record.transfer.status, 200);
           assert.equal(record.transfer.mimeType, "message/rfc822");
           assert.equal(record.transfer.equal, true, "Email response preserves authored bytes");

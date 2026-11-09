@@ -12,6 +12,7 @@ import { stripTypeScriptTypes } from "node:module";
 import worker from "../src/index.ts";
 import { mockBucket, signedAccess, nodeRequest } from "./fixtures.mjs";
 import { seedPreviews, qualifyPreviews } from "./preview-fixtures.mjs";
+import { seedFullEmails, qualifyFullEmails } from "./email-fixtures.mjs";
 
 const root = new URL("../dashboard/", import.meta.url);
 
@@ -165,6 +166,7 @@ test("the exact selected layout derivative exercises all enabled API contracts a
   t.mock.method(globalThis, "fetch", async (url, options) => String(url) === "https://dashboard-client.cloudflareaccess.com/cdn-cgi/access/certs" ? Response.json({ keys: [access.jwk] }) : realFetch(url, options));
   const state = mockBucket();
   const previews = await seedPreviews(state);
+  seedFullEmails(state);
   state.objects.set(".hidden", { bytes: new TextEncoder().encode("hidden") });
   const manifest = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
   const derivative = JSON.parse(await readFile(new URL("preview-layout-v1/manifest.json", root), "utf8"));
@@ -382,6 +384,8 @@ test("the exact selected layout derivative exercises all enabled API contracts a
       selectedWorker = worker;
     }
     await qualifyPreviews(cdp, origin, previews, browserEvidence, mode => { pdfImageMode = mode; });
+    await qualifyFullEmails(cdp, origin, browserEvidence);
+    assert.deepEqual(state.calls.filter(([operation, key]) => ["put", "delete", "create", "resume"].includes(operation) && key.startsWith(".r2-explorer/")), [], "Read-only stored-email qualification must not write the unmanaged hidden prefix");
     assert.deepEqual(failures.filter(failure => failure.pdfImageMode === "normal"), [], "Ordinary click-driven previews must not introduce failed API/static requests");
     for (const failure of failures.filter(failure => failure.pdfImageMode !== "normal")) {
       assert.ok(["missing", "corrupt", "mime", "redirect", "html"].includes(failure.pdfImageMode));
