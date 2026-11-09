@@ -1,8 +1,8 @@
-import { test } from "node:test";
+import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import {
   CONTROL_LIMITS, ControlError, checkControl, checkQuery, controlRoute, decodedKey,
-  parseControl, readControl, replayControl, controlFailure,
+  parseControl, readControl, replayControl, controlFailure, controlUrl,
 } from "../src/control.ts";
 
 const encode = (s) => Buffer.from(s).toString("base64");
@@ -87,6 +87,32 @@ test("stalled, aborted and failing streams have bounded cleanup", async () => {
   assert.equal(request.body.locked, false);
 });
 
+test("read bookkeeping is independent of chunk count", async () => {
+  const race = mock.method(Promise, "race");
+  try {
+    const chunks = Array.from(bytes(" ".repeat(62) + "{}"), (b) => Uint8Array.of(b));
+    assert.deepEqual(parseControl(await readControl(streamRequest(chunks), { bytes: 128, milliseconds: 100 })), {});
+    assert.ok(race.mock.callCount() <= 1, "do not attach a pending interruption reaction per chunk");
+  } finally { race.mock.restore(); }
+});
+
+test("absolute read deadline also covers a finite sequence of empty chunks", async () => {
+  const req = streamRequest(Array.from({ length: 32 }, () => new Uint8Array()));
+  let now = 0;
+  const clock = mock.method(Date, "now", () => ++now);
+  try { await assert.rejects(readControl(req, { bytes: 32, milliseconds: 5 }), rejected(408)); }
+  finally { clock.mock.restore(); }
+  assert.equal(req.body.locked, false);
+});
+
+test("folder budgets include the effective trailing separator", () => {
+  checkControl("folder", { key: encode("a".repeat(1023)) });
+  checkControl("folder", { key: encode("a".repeat(1023) + "/") });
+  assert.throws(() => checkControl("folder", { key: encode("a".repeat(1024)) }), rejected(400));
+  checkControl("folder", { key: encode("é".repeat(511) + "a") });
+  assert.throws(() => checkControl("folder", { key: encode("é".repeat(512)) }), rejected(400));
+});
+
 test("bounded parsing preserves JSON semantics and rejects non-object roots", () => {
   for (const text of ["", "{", "null", "[]", "3", '"text"']) assert.throws(() => parseControl(bytes(text)), rejected(400));
   assert.deepEqual(parseControl(bytes('﻿{"a":1,"a":2}')), { a: 2 });
@@ -149,6 +175,16 @@ test("query limits match repeated-name representation before downstream coercion
   }
   checkQuery(url(`x=${"a".repeat(8190)}`));
   assert.throws(() => checkQuery(url(`x=${"a".repeat(8191)}`)), rejected(400));
+});
+
+test("routing normalization preserves reserved and literal-percent encodings", () => {
+  const normalized = controlUrl("https://console.example/%61pi/%62uckets/BACKUPS/%66older?include=httpMetadata");
+  assert.equal(normalized.pathname, "/api/buckets/BACKUPS/folder");
+  assert.equal(normalized.searchParams.get("include"), "httpMetadata");
+  for (const segment of ["a%2Fb%2Bc%3D", "a%252Fb", "%25ZZ"]) {
+    assert.equal(controlUrl(`https://console.example/api/buckets/BACKUPS/${segment}`).pathname, `/api/buckets/BACKUPS/${segment}`);
+  }
+  assert.throws(() => controlUrl("https://console.example/api/buckets/BACKUPS/%ZZ"), rejected(400));
 });
 
 test("classification and replay do not clone or reuse the consumed stream", async () => {

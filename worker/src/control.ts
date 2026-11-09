@@ -45,8 +45,22 @@ export function decodedKey(value: unknown): string | null {
   }
 }
 
+export type ControlUrl = Pick<URL, "origin" | "pathname" | "search" | "searchParams">;
+
+/** Match the pinned router's decodeURI and literal-percent treatment, without URL reserialization. */
+export function controlUrl(value: string): ControlUrl {
+  const url = new URL(value);
+  let pathname: string;
+  try {
+    pathname = decodeURI(url.pathname.replace(/%25/g, "%2525"));
+  } catch {
+    return invalid();
+  }
+  return { origin: url.origin, pathname, search: url.search, searchParams: url.searchParams };
+}
+
 /** Exact POST routes in the pinned Explorer. Binary routes never enter the JSON reader. */
-export function controlRoute(method: string, url: URL): ControlRoute | null {
+export function controlRoute(method: string, url: ControlUrl): ControlRoute | null {
   if (method !== "POST") return null;
   const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/)?.[1];
   if (!rest || ["upload", "multipart/create", "multipart/upload"].includes(rest)) return null;
@@ -55,7 +69,7 @@ export function controlRoute(method: string, url: URL): ControlRoute | null {
 }
 
 /** Chanfana 2.8.3 represents arrays as repeated names, not CSV or packed JSON. */
-export function checkQuery(url: URL): void {
+export function checkQuery(url: ControlUrl): void {
   if (!url.pathname.startsWith("/api/")) return;
   const query = url.search.slice(1);
   if (!boundedString(query, CONTROL_LIMITS.queryBytes)) invalid();
@@ -91,18 +105,24 @@ export async function readControl(
   const reader = request.body.getReader();
   const storage = new Uint8Array(limits.bytes);
   let used = 0;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: () => void = () => {};
   let complete = false;
-  const interrupted = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new ControlError(408)), limits.milliseconds);
-    onAbort = () => reject(new ControlError(400));
-    request.signal.addEventListener("abort", onAbort, { once: true });
-    if (request.signal.aborted) onAbort();
-  });
+  let interrupted: ControlError | undefined;
+  const interrupt = (status: number) => {
+    interrupted ??= new ControlError(status);
+    // Native cancellation resolves pending read() calls before producer acknowledgement.
+    void reader.cancel().catch(() => {});
+  };
+  const deadline = Date.now() + limits.milliseconds;
+  const timer = setTimeout(() => interrupt(408), limits.milliseconds);
+  const onAbort = () => interrupt(400);
+  request.signal.addEventListener("abort", onAbort, { once: true });
+  if (request.signal.aborted) onAbort();
   try {
     for (;;) {
-      const { done, value } = await Promise.race([reader.read(), interrupted]);
+      if (interrupted) throw interrupted;
+      if (Date.now() >= deadline) throw new ControlError(408);
+      const { done, value } = await reader.read();
+      if (interrupted) throw interrupted;
       if (done) {
         complete = true;
         return storage.subarray(0, used);
@@ -140,6 +160,10 @@ export function checkControl(route: ControlRoute, body: ControlObject): void {
     : route === "copy" ? ["sourceKey", "destinationKey"]
     : route === "metadata" ? [] : ["key"];
   for (const field of fields) if (decodedKey(body[field]) === null) invalid();
+  if (route === "folder") {
+    const key = decodedKey(body.key)!;
+    if (!key.endsWith("/") && !boundedString(key, CONTROL_LIMITS.keyBytes - 1)) invalid();
+  }
   if (route === "multipart/complete") {
     const parts = body.parts;
     if (!Array.isArray(parts) || parts.length < 1 || parts.length > CONTROL_LIMITS.parts) invalid();

@@ -1,7 +1,7 @@
 import { R2Explorer } from "r2-explorer";
 import {
-  CONTROL_LIMITS, ControlError, checkControl, checkQuery, controlFailure, controlRoute,
-  decodedKey, parseControl, readControl, replayControl,
+  CONTROL_LIMITS, ControlError, type ControlUrl, checkControl, checkQuery, controlFailure, controlRoute,
+  controlUrl, decodedKey, parseControl, readControl, replayControl,
 } from "./control.ts";
 
 interface Env {
@@ -102,7 +102,7 @@ const fromB64 = decodedKey;
  * Keys a request would modify, derived from R2-Explorer's write endpoints.
  * Returns null for non-write requests, [] for a write we cannot attribute (denied).
  */
-function writeTargets(req: Request, url: URL, body?: Record<string, unknown>): string[] | null {
+function writeTargets(req: Request, url: ControlUrl, body?: Record<string, unknown>): string[] | null {
   if (req.method !== "POST" && req.method !== "PUT" && req.method !== "DELETE") return null;
   const m = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/);
   if (!m) return null;
@@ -141,7 +141,7 @@ const JSON_WRITE_ROUTES = ["move", "copy", "folder", "delete", "multipart/comple
  * Allow only same-origin requests: Sec-Fetch-Site must be "same-origin", or, when the
  * browser does not send it, Origin must equal this Worker's origin.
  */
-function csrfError(req: Request, url: URL): string | null {
+function csrfError(req: Request, url: ControlUrl): string | null {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return null;
   const site = req.headers.get("sec-fetch-site");
   if (site !== null) {
@@ -182,7 +182,12 @@ export default {
     }
     if (err) return deny(403, `Invalid Cloudflare Access token: ${err}`);
 
-    const url = new URL(request.url);
+    let url: ControlUrl;
+    try {
+      url = controlUrl(request.url);
+    } catch (error) {
+      return controlFailure(error instanceof ControlError ? error.status : 500);
+    }
 
     // Public, unauthenticated share links would bypass Access: disabled entirely.
     // They also write .r2-explorer/ objects into the bucket. No email handler either.

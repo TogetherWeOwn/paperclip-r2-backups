@@ -88,6 +88,21 @@ test("write authorization retains source/destination and unknown-field semantics
   assert.equal((await run(request(path("folder"), { body: { key: encode("db/write") }, headers: { origin: "", "sec-fetch-site": "same-origin" } }))).status, 200);
 });
 
+test("routing representations share one set of pre-delegation controls", async () => {
+  const routes = ["/api/%62uckets/BACKUPS/folder", "/api/buckets/BACKUPS/%66older", "/%61pi/buckets/BACKUPS/folder"];
+  for (const route of routes) {
+    await denied(request(route, { body: { key: encode("outside/write") } }), 403);
+    await denied(request(route, { body: { key: encode("db/write") }, headers: { "content-length": String(CONTROL_LIMITS.bytes + 1) } }), 413, { WRITE_PREFIXES: "*" });
+    await denied(request(route, { body: {}, headers: { "content-type": "text/plain" } }), 403);
+  }
+  for (const route of ["/api/%62uckets/BACKUPS/shares", "/api/buckets/BACKUPS/a/%73hare", "/api/%65mails/send", "/%73hare/fixture"]) {
+    await denied(request(route, { body: {} }), 404);
+  }
+  for (const WRITE_PREFIXES of [undefined, "*"]) {
+    await denied(request(path("%ZZ"), { body: { customMetadata: {}, httpMetadata: {} } }), 400, { WRITE_PREFIXES });
+  }
+});
+
 test("streaming upload/create/part are not mistaken for control JSON", async () => {
   for (const route of ["upload", "multipart/create", "multipart/upload"]) {
     const query = `?key=${encodeURIComponent(encode("db/file"))}&uploadId=upload&partNumber=1`;

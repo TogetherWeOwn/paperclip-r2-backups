@@ -87,7 +87,8 @@ or the Workers Domains API) for a hostname in a zone on your account.
 - Multipart completion accepts 1–10,000 entries, integer part numbers 1–10,000, and
   opaque etags of at most 256 UTF-8 bytes. Entry order and etag contents are preserved.
   Control keys are limited to 1,024 decoded UTF-8 bytes / 4,096 encoded bytes, and upload
-  identifiers to 2,048 UTF-8 bytes. Supported dashboard JSON with charset and identity
+  identifiers to 2,048 UTF-8 bytes. Folder key budgets include the trailing `/` added
+  by the integration. Supported dashboard JSON with charset and identity
   encoding is retained; other JSON content encodings receive 415.
 - These are per-request control budgets, not a total-isolate memory, concurrency or
   rate limit. They do not establish the safety or identity of a deployed Worker.

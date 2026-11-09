@@ -78,6 +78,22 @@ test("pinned Explorer preserves copy authorization and service error semantics",
   assert.deepEqual(await completion.json(), { msg: "fixture upload unavailable" });
 });
 
+test("supported routing encodings retain valid folder behavior", async () => {
+  const written = [];
+  const bucket = { async put(key) { written.push(key); return { key }; } };
+  for (const route of ["/api/%62uckets/BACKUPS/folder", "/%61pi/buckets/BACKUPS/folder", "/api/buckets/BACKUPS/%66older"]) {
+    const response = await run(request(route, { body: { key: encode("db/fixture") } }), bucket);
+    assert.equal(response.status, 200);
+  }
+  assert.deepEqual(written, ["db/fixture/", "db/fixture/", "db/fixture/"]);
+  for (const key of ["db/" + "a".repeat(1020), "db/" + "a".repeat(1020) + "/"]) {
+    assert.equal((await run(request(path("folder"), { body: { key: encode(key) } }), bucket)).status, 200);
+    assert.equal(new TextEncoder().encode(written.at(-1)).length, 1024);
+  }
+  const rejected = await run(request(path("folder"), { body: { key: encode("db/" + "a".repeat(1021)) } }), noR2);
+  assert.equal(rejected.status, 400);
+});
+
 test("route aliases, methods and malformed controls cannot bypass the wrapper", async () => {
   for (const route of ["multipart/complete", "multipart/complete/", "multipart%2Fcomplete", "%6dove", "folder/"]) {
     const response = await run(request(path(route), { body: "null" }), noR2);
