@@ -119,6 +119,47 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     await names([original]);
     assert.deepEqual(mutations(), []);
 
+    record.download = { status: "unverified", progress: [] };
+    const downloadRequestStart = evidence.requests.length;
+    let downloadTimer;
+    await cdp.call("Browser.setDownloadBehavior", { behavior: "allowAndName", downloadPath: uploadDirectory, eventsEnabled: true });
+    try {
+      const completed = new Promise((resolve, reject) => {
+        downloadTimer = setTimeout(() => reject(new Error("File download completion deadline exceeded")), 10000);
+        cdp.on("Browser.downloadProgress", event => {
+          if (record.download.progress.length < 16) record.download.progress.push(event);
+          if (event.state === "completed") resolve(event);
+          if (event.state === "canceled") reject(new Error("File download canceled"));
+        });
+      });
+      const [download, completion] = await Promise.all([
+        cdp.event("Browser.downloadWillBegin"), completed, menu(original, "Download"),
+      ]);
+      assert.equal(download.suggestedFilename, original);
+      assert.ok(download.url.startsWith(`blob:${origin}/`), "The pinned client downloads its fetched Blob, not a direct API navigation");
+      assert.equal(completion.guid, download.guid);
+      assert.equal(completion.receivedBytes, Buffer.byteLength(body));
+      assert.equal(completion.totalBytes, Buffer.byteLength(body));
+      assert.match(download.guid, /^[0-9a-f-]{36}$/i);
+      const bytes = await readFile(join(uploadDirectory, download.guid));
+      assert.deepEqual(bytes, Buffer.from(body), "The actual completed browser download preserves exact Unicode bytes");
+      const objectUrl = `${origin}/api/buckets/BACKUPS/${Buffer.from(folder + original).toString("base64")}`;
+      assert.ok(evidence.requests.slice(downloadRequestStart).some(({ url }) => url === objectUrl));
+      const response = evidence.network.findLast(({ url }) => url === objectUrl);
+      assert.equal(response.status, 200);
+      assert.equal(response.mimeType, "text/plain");
+      assert.equal(response.headers["X-Content-Type-Options"] || response.headers["x-content-type-options"], "nosniff");
+      retained(original);
+      assert.deepEqual(mutations(), [], "Downloading a file must not mutate storage");
+      record.download = { ...record.download, status: "pass", suggestedFilename: download.suggestedFilename,
+        bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), exactBody: true,
+        completed: completion.state, objectUrl, blobUrl: download.url };
+      await snapshot("file-download");
+    } finally {
+      clearTimeout(downloadTimer);
+      await cdp.call("Browser.setDownloadBehavior", { behavior: "deny", eventsEnabled: false });
+    }
+
     await menu(original, "Rename");
     await dialog("Cancel");
     await closed();
