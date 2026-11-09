@@ -205,9 +205,9 @@ class Rclone:
         Never accept a partial command result or coerce malformed sizes to zero.
         """
         # Global rclone options can silently filter an otherwise valid listing.
-        # Allow remote configuration, not inherited command defaults (including
-        # future filtering options). Do not log their possibly sensitive values.
-        if any(name.startswith("RCLONE_") and name != "RCLONE_CONFIG" and
+        # Allow remote configuration and our binary override, not inherited command
+        # defaults (including future filters). Do not log possibly sensitive values.
+        if any(name.startswith("RCLONE_") and name not in ("RCLONE_CONFIG", "RCLONE_BIN") and
                not name.startswith("RCLONE_CONFIG_") for name in os.environ):
             raise BackupError("whole-bucket inventory refuses rclone environment options")
         out = self._run(["lsjson", "-R", "--files-only", "--no-mimetype",
@@ -578,8 +578,8 @@ def inventory_state(rc) -> tuple[int, dict]:
     bucket_bytes = 0
     for obj in rc.bucket_inventory():
         bucket_bytes += obj.size
-        prefix = obj.key.split("/", 1)[0] + "/"
-        if prefix in existing:
+        prefix = next((p for p in MANAGED_PREFIXES if obj.key.startswith(p)), None)
+        if prefix is not None:
             existing[prefix].append(obj)
     return bucket_bytes, existing
 

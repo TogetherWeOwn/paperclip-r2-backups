@@ -942,6 +942,22 @@ class BucketInventoryTests(unittest.TestCase):
                         operation(key)
                 run.assert_not_called()
 
+    def test_inventory_allows_binary_override_but_rejects_filter(self):
+        env = {"BACKUP_BUCKET": "bk", "RCLONE_BIN": "/reviewed/bin/rclone"}
+        proc = mock.Mock(returncode=0, stdout=b"[]")
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(b.subprocess, "run", return_value=proc) as run:
+            cfg = b.load_config()
+            rc = b.Rclone(cfg.bucket, cfg.rclone_bin)
+            self.assertEqual(rc.bucket_inventory(), [])
+            self.assertEqual(run.call_args.args[0], [env["RCLONE_BIN"], "lsjson", "-R",
+                "--files-only", "--no-mimetype", "--no-modtime", "R2:bk/"])
+            run.reset_mock()
+            with mock.patch.dict(os.environ, {"RCLONE_EXCLUDE": "ops/**"}):
+                with self.assertRaisesRegex(b.BackupError, "rclone environment options"):
+                    rc.bucket_inventory()
+            run.assert_not_called()
+
     def test_inventory_rejects_inherited_rclone_options(self):
         rc = b.Rclone("bk")
         for option in ("EXCLUDE", "INCLUDE", "FILTER", "FILES_FROM", "MAX_DEPTH",
@@ -1044,6 +1060,28 @@ class WholeBucketCapTests(RunFixture):
                     self.assertEqual(rc.store["other"], 123)
                     if not over:
                         self.assertEqual(sum(rc.store.values()), base + len(self.DATA) - previous)
+
+    def test_root_lookalikes_count_once_without_blocking_retention(self):
+        roots = {prefix.rstrip("/"): i + 1 for i, prefix in enumerate(b.MANAGED_PREFIXES)}
+        old = objs_for([self.now - dt.timedelta(days=i) for i in range(1, 11)], 100)
+        self.cfg.retain_daily, self.cfg.retain_weekly, self.cfg.retain_monthly = 0, 0, 0
+        rc = FakeRclone(old + [b.Obj(self.instance(), 30)] +
+                        [b.Obj(key, size) for key, size in roots.items()])
+        bucket_bytes, managed = b.inventory_state(rc)
+        self.assertEqual(bucket_bytes, sum(rc.store.values()))
+        self.assertEqual(sum(o.size for objs in managed.values() for o in objs),
+                         bucket_bytes - sum(roots.values()))
+        for objs in managed.values():
+            self.assertTrue(all(o.key not in roots for o in objs))
+        dump = os.path.join(self.backups, os.listdir(self.backups)[0])
+        managed[b.DB_PREFIX].append(b.Obj(b.db_key_for(dump), os.path.getsize(dump)))
+        plans = b.compute_retention(self.cfg, managed, self.now, True)
+        expected = [key for plan in plans.values() for key in plan.delete]
+        self.assertTrue(expected)
+        self.assertEqual(b.run(self.cfg, rc, self.now), b.EXIT_OK)
+        self.assertEqual(rc.deleted, expected)
+        self.assertTrue(all(key.startswith(b.DELETABLE_PREFIXES) for key in rc.deleted))
+        self.assertEqual({key: rc.store[key] for key in roots}, roots)
 
     def test_failed_initial_inventory_prevents_upload_and_retention(self):
         rc = FakeRclone([b.Obj(self.ARCHIVE_KEY, self.ARCHIVE_BYTES)])
