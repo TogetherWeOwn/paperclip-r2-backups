@@ -220,7 +220,12 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
     const uploaded = state.objects.get(folder + child + uploadName);
     assert.deepEqual(Buffer.from(uploaded.bytes), uploadBytes);
     assert.deepEqual(uploaded.httpMetadata, { contentType: "text/plain" });
-    assert.equal(Object.hasOwn(uploaded, "customMetadata"), false, "The pinned chooser omits custom metadata upload options");
+    const uploadRequest = evidence.requests.map(({ url }) => new URL(url)).find(url =>
+      url.pathname === "/api/buckets/BACKUPS/upload" &&
+      Buffer.from(url.searchParams.get("key") || "", "base64").toString() === folder + child + uploadName);
+    assert.ok(uploadRequest, "The chooser must issue the expected raw upload request");
+    assert.equal(uploadRequest.searchParams.has("customMetadata"), false, "The chooser omits the custom metadata query parameter");
+    assert.equal(uploaded.customMetadata, undefined, "The adapter passes undefined for omitted custom metadata");
     const uploadedHead = await state.bucket.head(folder + child + uploadName);
     assert.deepEqual(uploadedHead.customMetadata, {}, "R2 object details normalize omitted custom metadata");
     assert.deepEqual(uploadedHead.httpMetadata, { contentType: "text/plain" });
@@ -229,7 +234,8 @@ export async function qualifyWriteUi(cdp, origin, evidence, state) {
       ["put", folder + child + empty], ["put", folder + child + uploadName]]);
     retained(original);
     record.upload = { name: uploadName, bytes: uploadBytes.length, httpMetadata: uploadedHead.httpMetadata,
-      customMetadataOptionPresent: Object.hasOwn(uploaded, "customMetadata"),
+      customMetadataQueryPresent: uploadRequest.searchParams.has("customMetadata"),
+      customMetadataOption: uploaded.customMetadata === undefined ? "undefined" : uploaded.customMetadata,
       customMetadata: uploadedHead.customMetadata, exactBody: true };
     await snapshot("file-upload");
     record.status = "pass";

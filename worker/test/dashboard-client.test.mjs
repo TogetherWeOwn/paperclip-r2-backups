@@ -15,6 +15,7 @@ import { seedPreviews, seedMediaPreviews, qualifyPreviews } from "./preview-fixt
 import { seedFullEmails, qualifyFullEmails } from "./email-fixtures.mjs";
 import { seedListing, qualifyListing } from "./listing-fixtures.mjs";
 import { seedWriteUi, qualifyWriteUi } from "./write-ui-fixtures.mjs";
+import { qualifyEntrypoints } from "./entrypoint-fixtures.mjs";
 
 const root = new URL("../dashboard/", import.meta.url);
 
@@ -369,6 +370,7 @@ test("the exact selected layout derivative exercises all enabled API contracts a
     await writeFile(new URL("../artifacts/dashboard-client.json", import.meta.url), JSON.stringify({ dashboardVersion: "1.2.0", routes, failures, result }, null, 2));
     const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
     await writeFile(new URL("../artifacts/dashboard-client.png", import.meta.url), Buffer.from(screenshot.data, "base64"));
+    await qualifyEntrypoints(cdp, origin, browserEvidence, derivative);
     const controlEvidence = { ...browserEvidence, previews: [] };
     browserEvidence.originalWrapControl = controlEvidence.previews;
     selectedWorker = wrappingWorker;
