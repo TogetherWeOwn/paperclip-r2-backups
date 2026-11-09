@@ -34,7 +34,7 @@ export function seedListing(state) {
 export async function qualifyListing(cdp, origin, evidence, pages) {
   const artifacts = new URL("../artifacts/listing/", import.meta.url);
   await mkdir(artifacts, { recursive: true });
-  const record = evidence.listing = { status: "unverified", pages, snapshots: {} };
+  const record = evidence.listing = { status: "unverified", pages, snapshots: {}, scrolls: [] };
   const evaluate = async (source) => {
     const result = await cdp.call("Runtime.evaluate", {
       expression: `(async () => {
@@ -75,10 +75,16 @@ export async function qualifyListing(cdp, origin, evidence, pages) {
     assert.ok(!record.snapshots.first.some(name => name.startsWith(".")), "Hidden backend object is filtered by the actual client");
     await screenshot("first-page");
     for (const [page, count] of [[2, 49], [3, 64]]) {
-      const point = await evaluate(`const container = [...document.querySelectorAll('div')].find(el => el.style.overflowY === 'auto' && el.style.height === '100vh');
+      const scroll = await evaluate(`const container = [...document.querySelectorAll('div')].find(el => el.style.overflowY === 'auto' && el.style.height === '100vh');
         if (!container || container.scrollHeight <= container.clientHeight) throw new Error('Scrollable file page missing');
-        const box = container.getBoundingClientRect(); return {x: Math.min(innerWidth - 30, box.right - 30), y: Math.min(innerHeight - 80, box.bottom - 80)};`);
-      await cdp.call("Input.dispatchMouseEvent", { type: "mouseWheel", ...point, deltaX: 0, deltaY: 10000 });
+        const box = container.getBoundingClientRect(); return {x: Math.min(innerWidth - 30, box.right - 30), y: Math.min(innerHeight - 80, box.bottom - 80),
+          top: container.scrollTop, height: container.scrollHeight, viewport: container.clientHeight,
+          deltaY: Math.ceil(container.scrollHeight - container.clientHeight - container.scrollTop)};`);
+      assert.ok(scroll.deltaY > 0, "Each page requires an actual downward scroll");
+      record.scrolls.push({ page, ...scroll });
+      // Stop at the current bottom: an oversized wheel can consume the next
+      // appended page before its intermediate row-count assertion observes it.
+      await cdp.call("Input.dispatchMouseEvent", { type: "mouseWheel", x: scroll.x, y: scroll.y, deltaX: 0, deltaY: scroll.deltaY });
       record.snapshots[`page${page}`] = await evaluate(`await wait(() => settled() && filenames().length === ${count}, 'Scroll-driven page ${page}'); return filenames();`);
     }
     const all = record.snapshots.page3;
