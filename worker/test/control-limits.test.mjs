@@ -58,6 +58,16 @@ test("UTF-8 actual bytes count; many tiny and empty chunks do not accumulate ref
   await assert.rejects(readControlJson(input([text + " "]).request, small), { status: 413 });
 });
 
+test("tiny chunks do not retain a deadline reaction per read", async (t) => {
+  const realRace = Promise.race.bind(Promise);
+  let races = 0;
+  t.mock.method(Promise, "race", (values) => { races++; return realRace(values); });
+  const text = '{"v":"' + "x".repeat(56) + '"}';
+  const chunks = [...encoder.encode(text)].map((byte) => Uint8Array.of(byte));
+  assert.deepEqual(await readControlJson(input(chunks).request, { ...small, controlBytes: 64 }), JSON.parse(text));
+  assert.ok(races <= 1, "read loop must not add reactions to a shared pending deadline");
+});
+
 test("header rejection precedes reader acquisition", async () => {
   for (const headers of [
     { "content-length": "-1" }, { "content-length": "1.5" }, { "content-length": "bad" },

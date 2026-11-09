@@ -61,10 +61,12 @@ export async function readControlJson(
 
   const expiresAt = performance.now() + limits.controlTimeoutMs;
   const reader = request.body.getReader();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new InputError(408)), limits.controlTimeoutMs);
-  });
+  let interrupted = false;
+  const timer = setTimeout(() => {
+    interrupted = true;
+    // Cancelling settles a pending read without awaiting the producer's acknowledgement.
+    void reader.cancel().catch(() => {});
+  }, limits.controlTimeoutMs);
   let complete = false;
   try {
     // Copy into bounded storage, rather than retaining arbitrarily many tiny/empty chunks.
@@ -73,8 +75,8 @@ export async function readControlJson(
     while (true) {
       // Already-resolved empty reads can starve timer callbacks; check the clock as well.
       if (performance.now() >= expiresAt) throw new InputError(408);
-      const { done, value } = await Promise.race([reader.read(), deadline]);
-      if (performance.now() >= expiresAt) throw new InputError(408);
+      const { done, value } = await reader.read();
+      if (interrupted || performance.now() >= expiresAt) throw new InputError(408);
       if (done) break;
       if (value.byteLength > limits.controlBytes - size) throw new InputError(413);
       const required = size + value.byteLength;
