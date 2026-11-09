@@ -8,6 +8,7 @@ import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripTypeScriptTypes } from "node:module";
 import worker from "../src/index.ts";
 import { mockBucket, signedAccess, nodeRequest } from "./fixtures.mjs";
 import { seedPreviews, qualifyPreviews } from "./preview-fixtures.mjs";
@@ -134,7 +135,30 @@ async function connect(url) {
   };
 }
 
-test("the exact selected email-constructor derivative exercises all enabled API contracts and previews", async (t) => {
+async function originalWrapControl(manifest) {
+  // Fixture-only representation selection, like the existing pin mutation tests.
+  // Serve the retained old HTML/module bytes, not DOM CSS or altered bundle bytes.
+  let source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const replace = (from, to) => {
+    assert.equal(source.split(from).length - 1, 1);
+    source = source.replace(from, to);
+  };
+  const start = source.indexOf("const TRUSTED_SCRIPTS:");
+  const end = source.indexOf("\n};", start) + 3;
+  assert.ok(start >= 0 && end > start);
+  const pins = Object.fromEntries(Object.entries(manifest.files).filter(([path]) => path.endsWith(".js"))
+    .map(([path, pin]) => ["/" + path, {bytes:pin.bytes, hash:pin.sha256}]));
+  replace(source.slice(start, end), "const TRUSTED_SCRIPTS = " + JSON.stringify(pins) + ";");
+  replace('const DOCUMENT_PATH = "/preview-layout-v1/";', 'const DOCUMENT_PATH = "/email-constructor-v1/";');
+  const html = manifest.files["email-constructor-v1/index.html"];
+  replace('const DOCUMENT_PIN = { bytes: 2318, hash: "2a356c67a20ba6174a2c7a04f00e7e2ca2cbaa6faa749181c0a8cac6232055a6" };',
+    "const DOCUMENT_PIN = " + JSON.stringify({bytes:html.bytes, hash:html.sha256}) + ";");
+  replace('  if (/^\\/email-constructor-v1(?:\\/|$)/.test(url.pathname) || url.pathname.endsWith(".email-constructor-v1.js")) return deny(404, "Not found");', "");
+  replace('"./console-api.ts"', JSON.stringify(new URL("../src/console-api.ts", import.meta.url).href));
+  return (await import("data:text/javascript;base64," + Buffer.from(stripTypeScriptTypes(source)).toString("base64"))).default;
+}
+
+test("the exact selected layout derivative exercises all enabled API contracts and previews", async (t) => {
   const access = await signedAccess("dashboard-client");
   const jwt = await access.token();
   const realFetch = globalThis.fetch;
@@ -143,7 +167,10 @@ test("the exact selected email-constructor derivative exercises all enabled API 
   const previews = await seedPreviews(state);
   state.objects.set(".hidden", { bytes: new TextEncoder().encode("hidden") });
   const manifest = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
-  const derivative = JSON.parse(await readFile(new URL("email-constructor-v1/manifest.json", root), "utf8"));
+  const derivative = JSON.parse(await readFile(new URL("preview-layout-v1/manifest.json", root), "utf8"));
+  const previous = JSON.parse(await readFile(new URL("email-constructor-v1/manifest.json", root), "utf8"));
+  const wrappingWorker = await originalWrapControl(previous);
+  let selectedWorker = worker;
   const routes = [];
   const failures = [];
   let origin;
@@ -152,7 +179,7 @@ test("the exact selected email-constructor derivative exercises all enabled API 
     BACKUPS: state.bucket, ACCESS_TEAM_NAME: access.team, ACCESS_AUD: "fixture-aud",
     ASSETS: { async fetch(request) {
       let path = new URL(request.url).pathname.slice(1);
-      if (path === "email-constructor-v1/") path += "index.html";
+      if (["preview-layout-v1/", "email-constructor-v1/"].includes(path)) path += "index.html";
       if (!path || !path.includes(".")) path = "index.html";
       if (path === "pdf-note-v1/annotation-note.svg") {
         const bytes = await readFile(new URL(path, root));
@@ -163,7 +190,7 @@ test("the exact selected email-constructor derivative exercises all enabled API 
           headers: { "content-type": pdfImageMode === "mime" ? "text/html" : "image/svg+xml" },
         });
       }
-      if (!Object.hasOwn(manifest.files, path) && !Object.hasOwn(derivative.files, path)) return new Response("Not found", { status: 404 });
+      if (!Object.hasOwn(manifest.files, path) && !Object.hasOwn(derivative.files, path) && !Object.hasOwn(previous.files, path)) return new Response("Not found", { status: 404 });
       const extension = path.split(".").pop();
       const types = { js: "text/javascript", css: "text/css", html: "text/html", svg: "image/svg+xml", png: "image/png", woff: "font/woff", woff2: "font/woff2", ico: "image/x-icon" };
       return new Response(await readFile(new URL(path, root)), { headers: { "content-type": types[extension] || "application/octet-stream" } });
@@ -173,7 +200,7 @@ test("the exact selected email-constructor derivative exercises all enabled API 
     try {
       const request = nodeRequest(incoming, origin, { "cf-access-jwt-assertion": jwt });
       if (incoming.url.startsWith("/api/")) routes.push({ method: request.method, path: new URL(request.url).pathname });
-      const response = await worker.fetch(request, env, {});
+      const response = await selectedWorker.fetch(request, env, {});
       if (response.status >= 400) failures.push({ method: request.method, path: new URL(request.url).pathname, status: response.status, pdfImageMode });
       outgoing.writeHead(response.status, Object.fromEntries(response.headers));
       if (response.body) Readable.fromWeb(response.body).pipe(outgoing);
@@ -264,10 +291,10 @@ test("the exact selected email-constructor derivative exercises all enabled API 
     const evaluated = await cdp.call("Runtime.evaluate", {
       expression: `(async () => {
         const app = document.querySelector('#q-app').__vue_app__;
-        const m = await import('/assets/index.email-constructor-v1.js');
-        const lazy = await import('/assets/EmailFilePage.email-constructor-v1.js');
+        const m = await import('/assets/index.preview-layout-v1.js');
+        const lazy = await import('/assets/EmailFilePage.preview-layout-v1.js');
         const graph = {sameApplication: document.querySelector('#q-app').__vue_app__ === app,
-          sameMain: m === await import('/assets/index.email-constructor-v1.js'), lazyLoaded: !!lazy.default,
+          sameMain: m === await import('/assets/index.preview-layout-v1.js'), lazyLoaded: !!lazy.default,
           scripts: performance.getEntriesByType('resource').filter(r => new URL(r.name).pathname.endsWith('.js')).map(r => new URL(r.name).pathname)};
         const config = (await m.a.get('/server/config')).data;
         const store = m.u();
@@ -306,8 +333,8 @@ test("the exact selected email-constructor derivative exercises all enabled API 
     assert.equal(result.graph.sameApplication, true);
     assert.equal(result.graph.sameMain, true);
     assert.equal(result.graph.lazyLoaded, true);
-    assert.ok(result.graph.scripts.includes("/assets/index.email-constructor-v1.js"));
-    assert.ok(result.graph.scripts.includes("/assets/EmailFilePage.email-constructor-v1.js"));
+    assert.ok(result.graph.scripts.includes("/assets/index.preview-layout-v1.js"));
+    assert.ok(result.graph.scripts.includes("/assets/EmailFilePage.preview-layout-v1.js"));
     for (const path of result.graph.scripts) assert.ok(Object.hasOwn(derivative.files, path.slice(1)), path);
     browserEvidence.moduleGraph = result.graph;
     assert.equal(result.config.dashboardVersion, "1.2.0");
@@ -334,6 +361,26 @@ test("the exact selected email-constructor derivative exercises all enabled API 
     await writeFile(new URL("../artifacts/dashboard-client.json", import.meta.url), JSON.stringify({ dashboardVersion: "1.2.0", routes, failures, result }, null, 2));
     const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
     await writeFile(new URL("../artifacts/dashboard-client.png", import.meta.url), Buffer.from(screenshot.data, "base64"));
+    const controlEvidence = { ...browserEvidence, previews: [] };
+    browserEvidence.originalWrapControl = controlEvidence.previews;
+    selectedWorker = wrappingWorker;
+    try {
+      await assert.rejects(qualifyPreviews(cdp, origin, ["case-embedded.pdf"], controlEvidence, mode => { pdfImageMode = mode; }, {
+        onlyEmbedded: true, artifactDirectory: "original-wrap-control",
+      }), /PDF resize dimensions/);
+      browserEvidence.originalWrapControl = controlEvidence.previews;
+      assert.equal(controlEvidence.previews.length, 1);
+      const control = controlEvidence.previews[0];
+      assert.equal(control.status, "fail");
+      assert.deepEqual(control.evalProbe, {cached:true, value:false});
+      assert.equal(control.fonts.fakeWorker, true);
+      const before = control.resizeLayout.initialSettled, after = control.resizeLayout.narrow;
+      assert.ok(after.dialog[1].clientWidth < before.dialog[1].clientWidth);
+      assert.equal(after.dialog[2].clientWidth, before.dialog[2].clientWidth, "Original wrapping section retains the demonstrated overflow");
+      assert.deepEqual(after.canvases, before.canvases);
+    } finally {
+      selectedWorker = worker;
+    }
     await qualifyPreviews(cdp, origin, previews, browserEvidence, mode => { pdfImageMode = mode; });
     assert.deepEqual(failures.filter(failure => failure.pdfImageMode === "normal"), [], "Ordinary click-driven previews must not introduce failed API/static requests");
     for (const failure of failures.filter(failure => failure.pdfImageMode !== "normal")) {

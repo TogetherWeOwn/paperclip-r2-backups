@@ -21,7 +21,7 @@ test("immutable dashboard snapshot, supplied spa layout and MIT license remain e
   }
   assert.equal(total, manifest.totalBytes);
   const all = (await readdir(dashboard, { recursive: true, withFileTypes: true })).filter((entry) => entry.isFile());
-  assert.equal(all.length, 75); // 56 originals, six evidence, nine derivatives, one manifest, three separate PDF files.
+  assert.equal(all.length, 85); // 56 originals, six evidence, two nine-payload derivatives/manifests, three PDF files.
   for (const [path, hash] of Object.entries({
     "checksums.json": "9d0d73c0c2f4f4be8390c5389e75a4dc4131831460e56d3858bb4609b4303f3d",
     "PROVENANCE.md": "14c74775a834af1842e804dc253ebba7f591e601c556d99132d4326582f5a3b9",
@@ -63,6 +63,52 @@ test("email derivative is exactly the selected constructor and complete module-r
     total += actual.length;
   }
   assert.equal(total, 1_666_162);
+});
+
+test("layout derivative is only the count-one FilePreview class, notice and complete reference closure", async () => {
+  const encoded = await readFile(new URL("preview-layout-v1/manifest.json", dashboard));
+  assert.equal(encoded.length, 6586);
+  assert.equal(digest(encoded), "60808ca252e7b14c138b73c3eb846578b4308330640944fdfc06a3bf0b660efc");
+  const manifest = JSON.parse(encoded);
+  const parentBytes = await readFile(new URL(manifest.parentManifest.path, dashboard));
+  assert.equal(parentBytes.length, manifest.parentManifest.bytes);
+  assert.equal(digest(parentBytes), manifest.parentManifest.sha256);
+  const parent = JSON.parse(parentBytes);
+  assert.equal(Object.keys(manifest.files).length, 9);
+  assert.equal(Object.keys(manifest.operations.basenameReplacements).length, 8);
+  assert.deepEqual(manifest.operations.layout, {
+    from: 'createVNode(QCard,{class:"flex column"}',
+    to: 'createVNode(QCard,{class:"flex column no-wrap"}', count: 1,
+  });
+  let total = 0;
+  for (const [path, pin] of Object.entries(manifest.files)) {
+    const source = await readFile(new URL(pin.parentPath, dashboard));
+    assert.equal(source.length, pin.parentBytes);
+    assert.equal(digest(source), pin.parentSha256);
+    assert.equal(parent.files[pin.parentPath].sha256, pin.parentSha256);
+    for (const original of pin.originalPaths) {
+      const bytes = await readFile(new URL(original, dashboard));
+      assert.equal(bytes.length, pin.originalBytes);
+      assert.equal(digest(bytes), pin.originalSha256);
+    }
+    let expected = source.toString("utf8");
+    if (path === "assets/index.preview-layout-v1.js") {
+      const operation = manifest.operations.layout;
+      assert.equal(expected.split(operation.from).length - 1, 1);
+      const isolated = expected.replace(operation.from, operation.to);
+      assert.equal(Buffer.byteLength(isolated), 1652130);
+      assert.equal(digest(isolated), "6c59e796a9f17dee66146729ad66d155ed92969144dc159dac65bbd0ee97877a");
+      expected = manifest.operations.mainPrefix + isolated;
+    }
+    for (const [before, after] of Object.entries(manifest.operations.basenameReplacements)) expected = expected.split(before).join(after);
+    const actual = await readFile(new URL(path, dashboard));
+    assert.deepEqual(actual, Buffer.from(expected), path);
+    assert.equal(actual.length, pin.bytes);
+    assert.equal(digest(actual), pin.sha256);
+    for (const before of Object.keys(manifest.operations.basenameReplacements)) assert.equal(expected.includes(before), false);
+    total += actual.length;
+  }
+  assert.equal(total, 1_666_261);
 });
 
 test("PDF Note is exactly the separately selected original member, license and provenance, never an inventory rewrite", async () => {

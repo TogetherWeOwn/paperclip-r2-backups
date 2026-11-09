@@ -7,7 +7,7 @@ import { mockBucket, signedAccess, request, keyPath } from "./fixtures.mjs";
 
 const root = new URL("../dashboard/", import.meta.url);
 const navigation = "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; sandbox allow-downloads";
-const scripts = ["AuthLayout", "EmailFilePage", "ErrorNotFound", "LoginPage", "auth-store", "auth", "bus", "index"].map(name => name + ".email-constructor-v1.js");
+const scripts = ["AuthLayout", "EmailFilePage", "ErrorNotFound", "LoginPage", "auth-store", "auth", "bus", "index"].map(name => name + ".preview-layout-v1.js");
 const paths = scripts.map(name => "/assets/" + name);
 const conditionalHeaders = ["if-none-match", "if-modified-since", "if-match", "if-unmodified-since", "if-range", "range"];
 const digest = bytes => createHash("sha256").update(bytes).digest("hex");
@@ -21,13 +21,13 @@ async function fixture(t, team) {
   const state = mockBucket();
   const seen = [];
   const original = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
-  const derivative = JSON.parse(await readFile(new URL("email-constructor-v1/manifest.json", root), "utf8"));
+  const derivative = JSON.parse(await readFile(new URL("preview-layout-v1/manifest.json", root), "utf8"));
   const env = {
     ACCESS_TEAM_NAME: team, ACCESS_AUD: "fixture-aud", BACKUPS: state.bucket,
     ASSETS: { async fetch(req) {
       seen.push(req);
       let path = new URL(req.url).pathname.slice(1);
-      if (path === "email-constructor-v1/") path += "index.html";
+      if (path === "preview-layout-v1/") path += "index.html";
       if (!path || !path.includes(".")) path = "index.html";
       if (!Object.hasOwn(original.files, path) && !Object.hasOwn(derivative.files, path)) return new Response("Not found", { status: 404 });
       const type = path.endsWith(".js") ? "text/javascript; charset=utf-8" : path.endsWith(".css") ? "text/css" : "text/html";
@@ -47,21 +47,21 @@ function policy(response, value) {
 
 test("navigation aliases and recognized deep links select the exact disclosed derivative without changing the browser URL", async (t) => {
   const f = await fixture(t, "document-policy");
-  for (const path of ["/", "/index.html", "/spa", "/spa/", "/spa/index.html", "/email-constructor-v1/", "/email-constructor-v1/index.html", "/BACKUPS/files/ZGIv/", "/spa/files/BACKUPS/db/"]) {
+  for (const path of ["/", "/index.html", "/spa", "/spa/", "/spa/index.html", "/preview-layout-v1/", "/preview-layout-v1/index.html", "/BACKUPS/files/ZGIv/", "/spa/files/BACKUPS/db/"]) {
     for (const method of ["GET", "HEAD"]) {
       const req = request(path + "?ignored=1", { method, headers: { ...Object.fromEntries(conditionalHeaders.map(name => [name, '"old"'])), "x-forwarded-host": "untrusted.test" } });
       const before = req.url;
       const response = await f.send(req);
       assert.equal(response.status, 200);
       policy(response, expected());
-      assert.equal(response.headers.get("content-location"), "/email-constructor-v1/");
+      assert.equal(response.headers.get("content-location"), "/preview-layout-v1/");
       assert.equal(response.headers.get("location"), null);
       const body = Buffer.from(await response.arrayBuffer());
-      assert.equal(body.length, method === "HEAD" ? 0 : 2321);
-      if (method === "GET") assert.equal(digest(body), f.derivative.files["email-constructor-v1/index.html"].sha256);
+      assert.equal(body.length, method === "HEAD" ? 0 : 2318);
+      if (method === "GET") assert.equal(digest(body), f.derivative.files["preview-layout-v1/index.html"].sha256);
       assert.equal(req.url, before);
       const fetched = f.seen.at(-1);
-      assert.equal(fetched.url, "https://console.test/email-constructor-v1/");
+      assert.equal(fetched.url, "https://console.test/preview-layout-v1/");
       assert.equal(fetched.method, "GET");
       assert.equal(fetched.redirect, "manual");
       for (const name of conditionalHeaders) assert.equal(fetched.headers.get(name), null);
@@ -78,8 +78,10 @@ test("navigation aliases and recognized deep links select the exact disclosed de
 
 test("selected document fetch rejects redirects, cache/partial responses, wrong MIME and changed HTML", async (t) => {
   const f = await fixture(t, "document-integrity");
-  const html = await readFile(new URL("email-constructor-v1/index.html", root));
+  const html = await readFile(new URL("preview-layout-v1/index.html", root));
+  const stale = await readFile(new URL("email-constructor-v1/index.html", root));
   for (const make of [
+    () => new Response(stale, { headers: { "content-type": "text/html" } }),
     () => Response.redirect("https://console.test/index.html"),
     () => new Response(null, { status: 304 }),
     () => new Response(html, { status: 206, headers: { "content-type": "text/html" } }),
@@ -136,7 +138,9 @@ test("all eight trusted scripts retain separate selected bytes with no partial-c
   }
   for (const path of paths) {
     const bytes = await readFile(new URL(path.slice(1), root));
+    const stale = await readFile(new URL(path.slice(1).replace("preview-layout-v1", "email-constructor-v1"), root));
     for (const make of [
+      () => new Response(stale, { headers: { "content-type": "text/javascript" } }),
       () => Response.redirect("https://console.test/api/server/config"),
       () => new Response(null, { status: 304 }),
       () => new Response(bytes, { status: 206, headers: { "content-type": "text/javascript" } }),
@@ -165,18 +169,37 @@ test("legacy root and SPA scripts stay original and authenticated but are absent
     assert.equal(digest(Buffer.from(await response.arrayBuffer())), f.original.files[path]);
     assert.equal(response.headers.get("content-security-policy").split("; script-src ")[1].split(";", 1)[0].includes("https://console.test/" + path), false);
   }
-  for (const path of ["/assets/index.email-constructor-v1.js", "/spa/assets/index.email-constructor-v1.js", "/email-constructor-v1/manifest.json", "/index.html", "/BACKUPS/files/ZGIv/"]) {
+  for (const path of ["/assets/index.preview-layout-v1.js", "/spa/assets/index.preview-layout-v1.js", "/preview-layout-v1/manifest.json", "/index.html", "/BACKUPS/files/ZGIv/"]) {
     const before = f.seen.length;
     const response = await worker.fetch(request(path), f.env, {});
     assert.equal(response.status, 403);
     assert.equal(f.seen.length, before);
     policy(response, expected());
   }
-  for (const path of ["/spa/assets/index.email-constructor-v1.js", "/other/index.email-constructor-v1.js"]) {
+  for (const path of ["/spa/assets/index.preview-layout-v1.js", "/other/index.preview-layout-v1.js"]) {
     const response = await f.send(request(path));
     assert.equal(response.status, 404);
     policy(response, expected());
   }
+});
+
+test("superseded constructor graph is authenticated but never served as a stale alias or CSP source", async (t) => {
+  const f = await fixture(t, "superseded-identity");
+  const old = JSON.parse(await readFile(new URL("email-constructor-v1/manifest.json", root), "utf8"));
+  for (const path of ["/email-constructor-v1", "/email-constructor-v1/", "/email-constructor-v1/index.html", ...Object.keys(old.files).map(path => "/" + path)]) {
+    for (const method of ["GET", "HEAD"]) {
+      const before = f.seen.length;
+      const denied = await worker.fetch(request(path, { method }), f.env, {});
+      assert.equal(denied.status, 403);
+      const response = await f.send(request(path, { method }));
+      assert.equal(response.status, 404);
+      assert.equal(response.headers.get("content-location"), null);
+      assert.equal(f.seen.length, before);
+      policy(response, expected());
+      assert.equal(response.headers.get("content-security-policy").includes("email-constructor-v1"), false);
+    }
+  }
+  assert.deepEqual(f.calls, []);
 });
 
 test("API navigation policy wins after object metadata without buffering or modifying download bytes", async (t) => {
@@ -212,7 +235,7 @@ test("policy origin uses only validated effective URL origin, allowing HTTP only
 });
 
 test("the sole inline bootstrap is identical across original and derivative HTML", async () => {
-  for (const path of ["index.html", "spa/index.html", "email-constructor-v1/index.html"]) {
+  for (const path of ["index.html", "spa/index.html", "preview-layout-v1/index.html"]) {
     const html = await readFile(new URL(path, root), "utf8");
     // Exact delimiters in the integrity-pinned fixture, not an HTML sanitizer.
     const start = html.indexOf("<script>");

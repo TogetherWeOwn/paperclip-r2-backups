@@ -1,7 +1,7 @@
 # r2-backup-console
 
 A native Cloudflare Worker API (`backup-console-api-v1`) and an explicitly disclosed
-email-constructor derivative of the MIT-licensed
+email-constructor and preview-layout derivative of the MIT-licensed
 [R2-Explorer](https://github.com/G4brym/R2-Explorer) **1.2.0 dashboard** for the backup
 bucket. The byte-identical upstream snapshot remains immutable provenance, not a
 claim about the served derivative. The adapter has **zero npm runtime dependencies**. It does
@@ -40,7 +40,7 @@ workers.dev URL, route, custom domain or account identifier.
 
 Every response carries enforced CSP and `X-Content-Type-Options: nosniff` after
 metadata handling. Documents/static responses allow only the eight exact pinned
-`/assets/*.email-constructor-v1.js` URLs and the original loader's unchanged SHA256
+`/assets/*.preview-layout-v1.js` URLs and the original loader's unchanged SHA256
 inline-script hash. No script `self`, inline handlers, eval, real workers, external
 scripts or optional GitHub update connection is allowed. Trusted script requests
 are fetched without redirects/ranges/conditional reuse, checked for JavaScript
@@ -48,9 +48,11 @@ MIME, exact selected length and SHA256, then served without altering their bytes
 Legacy root/SPA script URLs still return verified original bytes behind Access,
 but are no longer executable CSP sources. No derivative SPA script aliases exist.
 Navigation aliases and recognized SPA fallback HTML select the separately pinned
-`email-constructor-v1/index.html` via an internal `/email-constructor-v1/` asset
+`preview-layout-v1/index.html` via an internal `/preview-layout-v1/` asset
 fetch, without redirecting the browser URL; `Content-Location` discloses that
-identity. Document fetches also reject redirects, partial/cache responses, wrong
+identity. Superseded `/email-constructor-v1` documents and constructor-only script
+URLs return authenticated 404s without ASSETS or SPA fallback; their files remain
+immutable on-disk evidence, not a second executable graph. Document fetches also reject redirects, partial/cache responses, wrong
 MIME and changed bytes; HEAD validates the full representation before omitting its
 body. Only pinned static representations are buffered; R2 objects remain streams. Static
 responses are no-store, including errors. This does not repair already-open or
@@ -145,7 +147,7 @@ artifact integrity, attribution and every asset digest. No install/build fetches
 separate from the npm graph and release-age policy; source subtraction alone is
 not a whole-advisory or deployed-remediation claim.
 
-`dashboard/email-constructor-v1/manifest.json` separately identifies nine served
+`dashboard/email-constructor-v1/manifest.json` separately retains nine prior
 payloads (1,666,162 bytes): one main bundle correcting only
 `new PostalMime.default().parse(this.filedata)` to
 `new PostalMime().parse(this.filedata)`, seven referencing module copies and one
@@ -156,6 +158,26 @@ original `checksums.json`, provenance and all notices remain unchanged. This is
 not a parser update, sanitization fix or clean-SBOM claim. Exact-head Actions must
 qualify semantic email parsing/reopening and the full preview/client matrix.
 The email correction adds no PDF renderer changes and does not waive image checks.
+
+`dashboard/preview-layout-v1/manifest.json` identifies the selected nine-payload
+representation (1,666,261 bytes), derived from those exact prior payloads. Its sole
+behavioral change adds Quasar's existing `no-wrap` utility to the unique FilePreview
+QCard (`flex column` → `flex column no-wrap`), plus a modification notice and the
+necessary eight-module/HTML reference closure. This shared preview-shell layout
+candidate adds no CSS, renderer/sensor changes, dependencies or CSP capabilities.
+The manifest retains original and parent paths/hashes and every deterministic
+operation; no original or prior derivative is overwritten. The eight new script
+pins replace, never union with, the old executable sources.
+
+Exact-head Actions must qualify real section/container/sensor/canvas contraction
+and restoration at 1366×768 → 900×700 → restore, both painted PDF pages, font and
+cached eval-probe semantics, annotation images and all shared preview/edit modes.
+The test also serves the exact retained wrapping representation through a
+fixture-only compiled handler selecting its old document/script pins. The same
+resize helper must reject that representation with unchanged section/canvas width;
+no bundle-byte, DOM CSS or Vue-scale injection is used. Separate original-wrap and
+candidate screenshots/geometry survive failures. Candidate source support is not
+proof of repair, full compatibility, finding acceptance or advisory remediation.
 
 `dashboard/pdf-note-v1/` separately retains the original 1,083-byte
 `pdfjs-dist@2.5.207` Note SVG, unchanged Apache-2.0 root LICENSE and pinned

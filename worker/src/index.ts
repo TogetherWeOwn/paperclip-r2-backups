@@ -125,14 +125,14 @@ function csrfError(req: Request, url: URL): string | null {
 }
 
 const TRUSTED_SCRIPTS: Record<string, { bytes: number; hash: string }> = {
-  "/assets/AuthLayout.email-constructor-v1.js": { bytes: 358, hash: "6cccf38efe2f1752d04572c151e3840346b1c92108125843d495ee140009beec" },
-  "/assets/EmailFilePage.email-constructor-v1.js": { bytes: 6148, hash: "f6cf924dd54cf707e0213508f1249200fbe6d1c68bd895d8c69dd366e4370344" },
-  "/assets/ErrorNotFound.email-constructor-v1.js": { bytes: 578, hash: "32cfb14abbba46392b2a866613e494c07d4777da81c2bcd2adb3918cbd908460" },
-  "/assets/LoginPage.email-constructor-v1.js": { bytes: 2593, hash: "271f972adfab468c4d0837092738f2b11678925ba2b02e6aa7e298e4c0fe145f" },
-  "/assets/auth-store.email-constructor-v1.js": { bytes: 997, hash: "fe3509163454fa53575012cec2b3162437a5c2d3fffea6faeb98b4a877b4248c" },
-  "/assets/auth.email-constructor-v1.js": { bytes: 315, hash: "e7b3eb8e2de9cedfe16f40e5458a1c6bb4d1a782271dea93d78e12a83337474a" },
-  "/assets/bus.email-constructor-v1.js": { bytes: 730, hash: "cc5446d18faf58b9390d1052d9da6fff6e49a4d50985d2abdd00302c3cafe4b1" },
-  "/assets/index.email-constructor-v1.js": { bytes: 1652122, hash: "1939ae791ff4b05c92f93b857734ebf3356979c73c4eb427a0113f5ecab0613b" },
+  "/assets/AuthLayout.preview-layout-v1.js": { bytes: 355, hash: "965abc58b409dbcce7bbf379d351683bc135212869b03d6ee4a30316622157bc" },
+  "/assets/EmailFilePage.preview-layout-v1.js": { bytes: 6145, hash: "e1bcb6b9f1e4f047f8cddce23de73bf088c237763e04954882fec56f2de9d987" },
+  "/assets/ErrorNotFound.preview-layout-v1.js": { bytes: 575, hash: "88ea1c11be8ed30754b6859d52b42abc9b2739dffb86f3ebec8bd4c10fd531d9" },
+  "/assets/LoginPage.preview-layout-v1.js": { bytes: 2587, hash: "ee4271e4ba77964294ac9def9c226c464ad9deaad4d273a83ea08b3be437023e" },
+  "/assets/auth-store.preview-layout-v1.js": { bytes: 994, hash: "75887c31945e1e207d38291cc689f9e5a5ecb33e0c61b9dccf702be6254708f4" },
+  "/assets/auth.preview-layout-v1.js": { bytes: 309, hash: "26106da4b611192ad70b9cadc6e428a79aad92e1ce65984891f6a575ec6d020b" },
+  "/assets/bus.preview-layout-v1.js": { bytes: 727, hash: "060e6e6e86af12498ad8ef2dc8be8b46dc38a5ec3f74f3e41742602c64e2cc75" },
+  "/assets/index.preview-layout-v1.js": { bytes: 1652251, hash: "650443fd1fde07831d40ab52e269854b18c2d0d31a64e47a7c9a28e14c07b31c" },
 };
 // Original scripts remain verifiable provenance URLs, never executable policy sources.
 const ORIGINAL_SCRIPTS: Record<string, { bytes: number; hash: string }> = {
@@ -147,8 +147,8 @@ const ORIGINAL_SCRIPTS: Record<string, { bytes: number; hash: string }> = {
 };
 const LEGACY_SCRIPTS = Object.fromEntries(["/assets/", "/spa/assets/"].flatMap((prefix) => Object.entries(ORIGINAL_SCRIPTS).map(([name, pin]) => [prefix + name, pin])));
 const SCRIPT_PATHS = Object.keys(TRUSTED_SCRIPTS);
-const DOCUMENT_PATH = "/email-constructor-v1/";
-const DOCUMENT_PIN = { bytes: 2321, hash: "ff24bce3ff737908210c36c0a28768fbbbd69d2e802fd39660ebaeaa7c21c49d" };
+const DOCUMENT_PATH = "/preview-layout-v1/";
+const DOCUMENT_PIN = { bytes: 2318, hash: "2a356c67a20ba6174a2c7a04f00e7e2ca2cbaa6faa749181c0a8cac6232055a6" };
 const ORIGINAL_DOCUMENT_PIN = { bytes: 2309, hash: "8134e3d37c08aaf1817a67b2d08d827823d2e3b4027ff6f011f5934ca4ae709a" };
 const NAVIGATION_POLICY = "default-src 'none'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'; sandbox allow-downloads";
 
@@ -276,6 +276,9 @@ async function selectedDocument(request: Request, env: Env, url: URL): Promise<R
 }
 
 async function protectedAsset(request: Request, env: Env, url: URL): Promise<Response> {
+  // The superseded constructor-only graph is retained on disk as evidence, not
+  // served as a stale document alias or a second executable application.
+  if (/^\/email-constructor-v1(?:\/|$)/.test(url.pathname) || url.pathname.endsWith(".email-constructor-v1.js")) return deny(404, "Not found");
   const pin = Object.hasOwn(TRUSTED_SCRIPTS, url.pathname) ? TRUSTED_SCRIPTS[url.pathname] :
     Object.hasOwn(LEGACY_SCRIPTS, url.pathname) ? LEGACY_SCRIPTS[url.pathname] : undefined;
   if (pin) {

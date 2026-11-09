@@ -1,0 +1,154 @@
+{
+  "schema": "preview-layout-derivative-v1",
+  "algorithm": "sha256",
+  "sourceHead": "b771042a4a04028d872122aad0c3ee5f0f68e998",
+  "parentManifest": {
+    "path": "email-constructor-v1/manifest.json",
+    "bytes": 4871,
+    "sha256": "391ae96f4e26a6171cd587dc1ebc235b4fdd1588c00599ed80f2a4be3920fcdd"
+  },
+  "operations": {
+    "layout": {
+      "from": "createVNode(QCard,{class:\"flex column\"}",
+      "to": "createVNode(QCard,{class:\"flex column no-wrap\"}",
+      "count": 1
+    },
+    "mainPrefix": "/* Modified by TogetherWeOwn: FilePreview no-wrap layout and module references; prior PostalMime constructor correction and original notices retained. */\n",
+    "basenameReplacements": {
+      "AuthLayout.email-constructor-v1.js": "AuthLayout.preview-layout-v1.js",
+      "EmailFilePage.email-constructor-v1.js": "EmailFilePage.preview-layout-v1.js",
+      "ErrorNotFound.email-constructor-v1.js": "ErrorNotFound.preview-layout-v1.js",
+      "LoginPage.email-constructor-v1.js": "LoginPage.preview-layout-v1.js",
+      "auth-store.email-constructor-v1.js": "auth-store.preview-layout-v1.js",
+      "auth.email-constructor-v1.js": "auth.preview-layout-v1.js",
+      "bus.email-constructor-v1.js": "bus.preview-layout-v1.js",
+      "index.email-constructor-v1.js": "index.preview-layout-v1.js"
+    }
+  },
+  "notices": [
+    "EXPLORER-LICENSE",
+    "THIRD-PARTY-NOTICES.md",
+    "source-notices.json",
+    "COMPONENTS.md",
+    "PROVENANCE.md"
+  ],
+  "files": {
+    "assets/AuthLayout.preview-layout-v1.js": {
+      "bytes": 355,
+      "sha256": "965abc58b409dbcce7bbf379d351683bc135212869b03d6ee4a30316622157bc",
+      "parentPath": "assets/AuthLayout.email-constructor-v1.js",
+      "parentBytes": 358,
+      "parentSha256": "6cccf38efe2f1752d04572c151e3840346b1c92108125843d495ee140009beec",
+      "originalPaths": [
+        "assets/AuthLayout.db6e752c.js",
+        "spa/assets/AuthLayout.db6e752c.js"
+      ],
+      "originalBytes": 346,
+      "originalSha256": "b5f5eaf25dfc166fd82988fb3fec42e696f94bde28bfe201e4943a5de92e97c1"
+    },
+    "assets/EmailFilePage.preview-layout-v1.js": {
+      "bytes": 6145,
+      "sha256": "e1bcb6b9f1e4f047f8cddce23de73bf088c237763e04954882fec56f2de9d987",
+      "parentPath": "assets/EmailFilePage.email-constructor-v1.js",
+      "parentBytes": 6148,
+      "parentSha256": "f6cf924dd54cf707e0213508f1249200fbe6d1c68bd895d8c69dd366e4370344",
+      "originalPaths": [
+        "assets/EmailFilePage.8578c819.js",
+        "spa/assets/EmailFilePage.8578c819.js"
+      ],
+      "originalBytes": 6136,
+      "originalSha256": "59cf080d0ffae848aba35c72610c591db7feed35db911c71990ebb80a048a26d"
+    },
+    "assets/ErrorNotFound.preview-layout-v1.js": {
+      "bytes": 575,
+      "sha256": "88ea1c11be8ed30754b6859d52b42abc9b2739dffb86f3ebec8bd4c10fd531d9",
+      "parentPath": "assets/ErrorNotFound.email-constructor-v1.js",
+      "parentBytes": 578,
+      "parentSha256": "32cfb14abbba46392b2a866613e494c07d4777da81c2bcd2adb3918cbd908460",
+      "originalPaths": [
+        "assets/ErrorNotFound.1cad377e.js",
+        "spa/assets/ErrorNotFound.1cad377e.js"
+      ],
+      "originalBytes": 566,
+      "originalSha256": "2cad3eb1bb505fd24405b5625f90745637fcebbf4f9bd76614b85fab9dbcee35"
+    },
+    "assets/LoginPage.preview-layout-v1.js": {
+      "bytes": 2587,
+      "sha256": "ee4271e4ba77964294ac9def9c226c464ad9deaad4d273a83ea08b3be437023e",
+      "parentPath": "assets/LoginPage.email-constructor-v1.js",
+      "parentBytes": 2593,
+      "parentSha256": "271f972adfab468c4d0837092738f2b11678925ba2b02e6aa7e298e4c0fe145f",
+      "originalPaths": [
+        "assets/LoginPage.c1ee667f.js",
+        "spa/assets/LoginPage.c1ee667f.js"
+      ],
+      "originalBytes": 2569,
+      "originalSha256": "74d14c5c727b0ccffabc4baf31b1cdde735ce5f8be2cf5c539ed0ff67aa46650"
+    },
+    "assets/auth-store.preview-layout-v1.js": {
+      "bytes": 994,
+      "sha256": "75887c31945e1e207d38291cc689f9e5a5ecb33e0c61b9dccf702be6254708f4",
+      "parentPath": "assets/auth-store.email-constructor-v1.js",
+      "parentBytes": 997,
+      "parentSha256": "fe3509163454fa53575012cec2b3162437a5c2d3fffea6faeb98b4a877b4248c",
+      "originalPaths": [
+        "assets/auth-store.ba1aa298.js",
+        "spa/assets/auth-store.ba1aa298.js"
+      ],
+      "originalBytes": 985,
+      "originalSha256": "3f62e5696ed8b8ea7a69a42ddbe5111132bab679d055d3f2fbbc3be94c802586"
+    },
+    "assets/auth.preview-layout-v1.js": {
+      "bytes": 309,
+      "sha256": "26106da4b611192ad70b9cadc6e428a79aad92e1ce65984891f6a575ec6d020b",
+      "parentPath": "assets/auth.email-constructor-v1.js",
+      "parentBytes": 315,
+      "parentSha256": "e7b3eb8e2de9cedfe16f40e5458a1c6bb4d1a782271dea93d78e12a83337474a",
+      "originalPaths": [
+        "assets/auth.315647f3.js",
+        "spa/assets/auth.315647f3.js"
+      ],
+      "originalBytes": 291,
+      "originalSha256": "7d536eb488ce6623303a61a2f897ec4f7164f795b20abbdfcfd3aee62d0d707b"
+    },
+    "assets/bus.preview-layout-v1.js": {
+      "bytes": 727,
+      "sha256": "060e6e6e86af12498ad8ef2dc8be8b46dc38a5ec3f74f3e41742602c64e2cc75",
+      "parentPath": "assets/bus.email-constructor-v1.js",
+      "parentBytes": 730,
+      "parentSha256": "cc5446d18faf58b9390d1052d9da6fff6e49a4d50985d2abdd00302c3cafe4b1",
+      "originalPaths": [
+        "assets/bus.2c308485.js",
+        "spa/assets/bus.2c308485.js"
+      ],
+      "originalBytes": 718,
+      "originalSha256": "6048f86039d9eb6c10e93193dfbc2ea7c551c033ecd64989c127af5be70eeb3f"
+    },
+    "assets/index.preview-layout-v1.js": {
+      "bytes": 1652251,
+      "sha256": "650443fd1fde07831d40ab52e269854b18c2d0d31a64e47a7c9a28e14c07b31c",
+      "parentPath": "assets/index.email-constructor-v1.js",
+      "parentBytes": 1652122,
+      "parentSha256": "1939ae791ff4b05c92f93b857734ebf3356979c73c4eb427a0113f5ecab0613b",
+      "originalPaths": [
+        "assets/index.97b9144c.js",
+        "spa/assets/index.97b9144c.js"
+      ],
+      "originalBytes": 1651880,
+      "originalSha256": "4ae881a8bbe7b75a9880279f2bd224d135cb854aca8d61586323711c57fbdaaa"
+    },
+    "preview-layout-v1/index.html": {
+      "bytes": 2318,
+      "sha256": "2a356c67a20ba6174a2c7a04f00e7e2ca2cbaa6faa749181c0a8cac6232055a6",
+      "parentPath": "email-constructor-v1/index.html",
+      "parentBytes": 2321,
+      "parentSha256": "ff24bce3ff737908210c36c0a28768fbbbd69d2e802fd39660ebaeaa7c21c49d",
+      "originalPaths": [
+        "index.html",
+        "spa/index.html"
+      ],
+      "originalBytes": 2309,
+      "originalSha256": "8134e3d37c08aaf1817a67b2d08d827823d2e3b4027ff6f011f5934ca4ae709a"
+    }
+  }
+}

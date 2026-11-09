@@ -66,7 +66,7 @@ test("Note GET and HEAD use one full pinned internal image, never folder storage
 
 test("Note backend status, MIME, length, full digest, encoding, fetch/read and pin failures stay closed for GET and HEAD", async t => {
   const f = await fixture(t, "note-backend");
-  const html = await readFile(new URL("email-constructor-v1/index.html", root));
+  const html = await readFile(new URL("preview-layout-v1/index.html", root));
   const make = (body = bytes, headers = {}, status = 200) => new Response(body, { status, headers: { "content-type": "image/svg+xml", ...headers } });
   const variants = [
     ...[404, 301, 302, 307, 308, 206].map(status => () => make(bytes, {}, status)),
@@ -229,9 +229,9 @@ test("Note helper never shadows R2 names or API dispatch; ordinary navigation an
   const original = JSON.parse(await readFile(new URL("checksums.json", root), "utf8"));
   f.env.ASSETS.fetch = async req => {
     const path = new URL(req.url).pathname;
-    return new Response(await readFile(new URL(path.endsWith("logo-white.svg") ? "logo-white.svg" : path === "/email-constructor-v1/" ? "email-constructor-v1/index.html" : "index.html", root)), { headers: { "content-type": path.endsWith(".svg") ? "image/svg+xml" : "text/html" } });
+    return new Response(await readFile(new URL(path.endsWith("logo-white.svg") ? "logo-white.svg" : path === "/preview-layout-v1/" ? "preview-layout-v1/index.html" : "index.html", root)), { headers: { "content-type": path.endsWith(".svg") ? "image/svg+xml" : "text/html" } });
   };
-  assert.equal((await f.send(request("/BACKUPS/files/ZGIv/"))).headers.get("content-location"), "/email-constructor-v1/");
+  assert.equal((await f.send(request("/BACKUPS/files/ZGIv/"))).headers.get("content-location"), "/preview-layout-v1/");
   const logo = await f.send(request("/logo-white.svg"));
   assert.equal(logo.status, 200);
   assert.equal(digest(Buffer.from(await logo.arrayBuffer())), original.files["logo-white.svg"]);

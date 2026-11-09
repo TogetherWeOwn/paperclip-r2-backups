@@ -103,8 +103,8 @@ function acceptAnnotationImages(images, responses, expectedUrl) {
   }
 }
 
-export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageMode) {
-  const artifacts = new URL("../artifacts/previews/", import.meta.url);
+export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageMode, { onlyEmbedded = false, artifactDirectory = "previews" } = {}) {
+  const artifacts = new URL(`../artifacts/${artifactDirectory}/`, import.meta.url);
   await mkdir(artifacts, { recursive: true });
   evidence.previews = [];
   const evaluate = async (expression) => {
@@ -128,7 +128,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
     ...names.map(name => ({ name, prefix: folder, mode: "normal", id: name })),
     ...["", "instance/qualification/", "db/???/"].map((prefix, index) => ({ name: "case-pdf.pdf", prefix, mode: "normal", id: `pdf-folder-${index}` })),
     ...["missing", "corrupt", "mime", "redirect", "html"].map(mode => ({ name: "case-pdf.pdf", prefix: folder, mode, id: `pdf-control-${mode}` })),
-  ];
+  ].filter(record => !onlyEmbedded || record.name === "case-embedded.pdf");
   for (const { name, prefix, mode, id } of cases) {
     // Match Vue Router's parameter encoder: slash only, not encodeURIComponent's
     // %3D/%2B aliases. Root is the client's single-space sentinel.
@@ -269,6 +269,12 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
               canvases:[...document.querySelectorAll('#pdfvuer canvas')].map(canvas => ({width:canvas.width, height:canvas.height}))};
           `);
           record.resizeLayout = {initial:await resizeLayout()};
+          await evaluate(`await wait(() => document.getAnimations().every(animation => animation.playState !== 'running'), 'Settled preview transition');`);
+          record.initialSettled = await measureResize(0);
+          record.resizeLayout.initialSettled = await resizeLayout();
+          assert.deepEqual(record.initialSettled.map(page => [page.width, page.height]), record.actual.pages.map(page => [page.width, page.height]), "Transition settling does not replace the initial baseline");
+          const initialScreenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
+          await writeFile(new URL(`${id}-initial.png`, artifacts), Buffer.from(initialScreenshot.data, "base64"));
           try {
             await cdp.call("Emulation.setDeviceMetricsOverride", { width: 900, height: 700, deviceScaleFactor: 1, mobile: false });
             try {
@@ -286,6 +292,28 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
           record.restored = await measureResize(record.narrow[0].width);
           record.resizeLayout.restored = await resizeLayout();
           assert.deepEqual(record.restored.map(page => [page.width, page.height]), record.actual.pages.map(page => [page.width, page.height]));
+          const initial = record.resizeLayout.initialSettled;
+          const narrow = record.resizeLayout.narrow;
+          const restored = record.resizeLayout.restored;
+          for (let index = 1; index < initial.dialog.length; index++) {
+            assert.ok(narrow.dialog[index].clientWidth > 0 && narrow.dialog[index].clientWidth < initial.dialog[index].clientWidth, "Card, section and PDF layout boxes actually contract");
+            assert.ok(narrow.dialog[index].scrollWidth <= narrow.dialog[index].clientWidth + 1, "No horizontally clipped preview content");
+            assert.equal(restored.dialog[index].clientWidth, initial.dialog[index].clientWidth);
+          }
+          for (let index = 0; index < 2; index++) {
+            const before = initial.pages[index], after = narrow.pages[index], back = restored.pages[index];
+            assert.ok(Number.isFinite(after.scale) && after.scale > 0 && after.scale < before.scale);
+            assert.ok(after.container.clientWidth < before.container.clientWidth);
+            assert.equal(back.container.clientWidth, before.container.clientWidth);
+            assert.equal(back.scale, before.scale);
+            assert.ok(after.sensors.length > 0);
+            for (let sensor = 0; sensor < after.sensors.length; sensor++) {
+              assert.ok(after.sensors[sensor].box.clientWidth < before.sensors[sensor].box.clientWidth);
+              assert.ok(after.sensors[sensor].size.width > 0 && after.sensors[sensor].size.width < before.sensors[sensor].size.width);
+              assert.equal(back.sensors[sensor].box.clientWidth, before.sensors[sensor].box.clientWidth);
+            }
+            assert.ok(record.narrow[index].width < record.actual.pages[index].width);
+          }
           assert.deepEqual(evidence.network.slice(networkStart).filter(response => response.type === "Worker" || /\.worker[.-]/i.test(response.url)), [], "No separately fetched real or remote PDF worker");
         } else {
           record.actual.annotationImages = await evaluate(`
