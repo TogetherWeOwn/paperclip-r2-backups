@@ -187,8 +187,18 @@ test("the exact unmodified dashboard client exercises all enabled API contracts"
     await cdp.call("Log.enable");
     await cdp.call("Network.enable");
     browserEvidence.version = await cdp.call("Browser.getVersion");
-    cdp.on("Network.responseReceived", ({ response, type }) => browserEvidence.network.push({ url: response.url, status: response.status, mimeType: response.mimeType, headers: response.headers, type }));
+    cdp.on("Network.responseReceived", ({ requestId, response, type }) => browserEvidence.network.push({ requestId, url: response.url, status: response.status, mimeType: response.mimeType, headers: response.headers, type }));
     cdp.on("Log.entryAdded", ({ entry }) => browserEvidence.console.push(entry));
+    // EmailViewer catches parser errors, so exceptionThrown alone misses them.
+    // Retain only this known fixture's parser diagnostic, never remote objects.
+    browserEvidence.emailParserErrors = [];
+    cdp.on("Runtime.consoleAPICalled", ({ type, args }) => {
+      if (type !== "error" || args[0]?.value !== "Error parsing email data:" || browserEvidence.emailParserErrors.length >= 8) return;
+      browserEvidence.emailParserErrors.push(args.slice(1, 3).map((arg) => ({
+        type: arg.type, subtype: arg.subtype,
+        message: String(arg.description || arg.value || "").split("\n", 1)[0].slice(0, 256),
+      })));
+    });
     cdp.on("Runtime.exceptionThrown", (event) => browserEvidence.exceptions.push(event));
     await cdp.call("Page.addScriptToEvaluateOnNewDocument", { source: `
       window.__policyEvents = [];

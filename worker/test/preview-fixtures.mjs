@@ -4,6 +4,10 @@ import { mkdir, writeFile } from "node:fs/promises";
 
 const folder = "db/qualification/";
 const text = "Unicode café Ω\n<b>preview-marker</b>\nlast-line";
+const email = [
+  "From: Fixture <fixture@example.invalid>", "To: Reader <reader@example.invalid>",
+  "Subject: Benign inline email", "MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8", "", text,
+].join("\r\n");
 
 // Authored ordinary PDF: two pages, standard-font fallback and a local annotation.
 // Embedded-font and numeric-glyph-path qualification remain separate requirements.
@@ -41,10 +45,7 @@ export function seedPreviews(state) {
     ["case-csv.csv", "name,value\nUnicode café,<b>preview-marker</b>\nlast-line,7", "text/csv"],
     ["case-fallback.xyz", text, "application/octet-stream"],
     ["case-log.log.gz", gzipSync(text), "application/gzip"],
-    ["case-email.eml", [
-      "From: Fixture <fixture@example.invalid>", "To: Reader <reader@example.invalid>",
-      "Subject: Benign inline email", "MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8", "", text,
-    ].join("\r\n"), "message/rfc822"],
+    ["case-email.eml", email, "message/rfc822"],
     ["case-image.png", Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO1sAAAAASUVORK5CYII=", "base64"), "image/png"],
     ["case-pdf.pdf", ordinaryPdf(), "application/pdf"],
   ];
@@ -181,7 +182,35 @@ export async function qualifyPreviews(cdp, origin, names, evidence) {
     } finally {
       const screenshot = await cdp.call("Page.captureScreenshot", { format: "png" });
       await writeFile(new URL(`${name}.png`, artifacts), Buffer.from(screenshot.data, "base64"));
-      record.snapshot = await evaluate(`return {path:location.pathname, text:document.body.innerText.slice(-3000), violations:window.__policyEvents};`);
+      record.snapshot = await evaluate(`
+        const dialog = document.querySelector('.q-dialog .q-card__section.scroll');
+        return {path:location.pathname, text:document.body.innerText.slice(-3000),
+          dialog: dialog ? {text:dialog.textContent.slice(0, 2048), html:dialog.innerHTML.slice(0, 4096)} : null,
+          annotationImages:[...document.querySelectorAll('#pdfvuer .annotationLayer img')].slice(0, 8)
+            .map(image => ({url:image.src, complete:image.complete, width:image.naturalWidth})),
+          violations:window.__policyEvents};
+      `);
+      if (name === "case-email.eml") {
+        record.parserErrors = evidence.emailParserErrors;
+        try {
+          const path = `/api/buckets/BACKUPS/${Buffer.from(folder + name).toString("base64")}`;
+          const response = evidence.network.findLast(response => decodeURIComponent(new URL(response.url).pathname) === path);
+          assert.ok(response, "Email object response was observed");
+          const body = await cdp.call("Network.getResponseBody", { requestId: response.requestId });
+          // Only the authored 218-byte text fixture is retrieved, never an arbitrary
+          // object stream. Retain equality/count, not the transferred content.
+          const bytes = Buffer.from(body.body, body.base64Encoded ? "base64" : "utf8");
+          record.transfer = {status:response.status, mimeType:response.mimeType,
+            bytes:bytes.length, expectedBytes:Buffer.byteLength(email), equal:bytes.equals(Buffer.from(email))};
+          assert.equal(record.transfer.status, 200);
+          assert.equal(record.transfer.mimeType, "message/rfc822");
+          assert.equal(record.transfer.equal, true, "Email response preserves authored bytes");
+        } catch (error) {
+          record.status = "fail";
+          record.transferError = String(error).slice(0, 1024);
+          record.error ||= record.transferError;
+        }
+      }
     }
   }
   await writeFile(new URL("results.json", artifacts), JSON.stringify(evidence.previews, null, 2));
