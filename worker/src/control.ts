@@ -33,7 +33,9 @@ const record = (value: unknown): value is ControlObject =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const boundedString = (value: unknown, bytes: number): value is string =>
   typeof value === "string" && value.length <= bytes && utf8.encode(value).byteLength <= bytes;
-const invalid = (): never => { throw new ControlError(400); };
+function invalid(): never {
+  throw new ControlError(400);
+}
 
 export function decodedKey(value: unknown): string | null {
   if (!boundedString(value, CONTROL_LIMITS.encodedKeyBytes) || !value) return null;
