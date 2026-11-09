@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { gzipSync } from "node:zlib";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { embeddedPdf, cachedPdfProbe } from "./pdf-fixtures.mjs";
+import { embeddedPdf, cachedPdfProbe, pdfComponentsExpression } from "./pdf-fixtures.mjs";
 
 const folder = "db/qualification/";
 const text = "Unicode café Ω\n<b>preview-marker</b>\nlast-line";
@@ -167,8 +167,9 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
       if (name.endsWith(".pdf")) {
         record.actual = await evaluate(`
           await wait(() => document.querySelectorAll('#pdfvuer canvas').length === 2 && [...document.querySelectorAll('#pdfvuer .page')].every(page => page.dataset.loaded === 'true'), 'Two rendered PDF pages');
-          const canvases = [...document.querySelectorAll('#pdfvuer canvas')];
+          const canvases = () => [...document.querySelectorAll('#pdfvuer canvas')];
           const measure = (canvas, threshold = Infinity) => {
+            if (!canvas.width || !canvas.height) return {width:canvas.width, height:canvas.height, ink:0};
             const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
             let ink = 0;
             for (let i = 0; i < pixels.length; i += 4) {
@@ -179,16 +180,15 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
           };
           // PDF.js sets data-loaded when drawing starts, before its asynchronous
           // paint task resolves. Require the same visible glyphs before sampling.
-          await wait(() => canvases.every(canvas => measure(canvas, 100).ink > 100), 'Both PDF canvases contain visible glyphs');
-          const pages = canvases.map(canvas => measure(canvas));
+          await wait(() => canvases().length === 2 && canvases().every(canvas => measure(canvas, 100).ink > 100), 'Both PDF canvases contain visible glyphs');
+          const pages = canvases().map(canvas => measure(canvas));
           return {pages, annotation: !!document.querySelector('#pdfvuer .annotationLayer'), workers: performance.getEntriesByType('resource').filter(r => /worker/i.test(r.name)).map(r => r.name)};
         `);
         assert.equal(record.actual.pages.length, 2);
         assert.ok(record.actual.pages.every((page) => page.width > 0 && page.height > 0 && page.ink > 100), "Both PDF canvases contain visible glyphs");
         if (name === "case-embedded.pdf") {
           record.fonts = await evaluate(`
-            const components = [...document.querySelectorAll('#pdfvuer [id="viewerContainer"]')]
-              .map(element => element.__vueParentComponent.proxy);
+            const components = ${pdfComponentsExpression};
             if (components.length !== 2 || components.some(component => !component.pdf)) throw new Error('PDF component state missing');
             const documentProxy = components[0].pdf;
             const worker = documentProxy.loadingTask._worker;
@@ -226,7 +226,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
             assert.ok(font.glyphs.every(source => source.includes(".apply(") && source.includes("q.cmd")), "Every cached glyph uses the shipped non-eval interpreter");
           }
           const glyphMethod = await cdp.call("Runtime.evaluate", {
-            expression: `Object.values(document.querySelector('#pdfvuer [id="viewerContainer"]').__vueParentComponent.proxy.pdf._transport.commonObjs._objs)
+            expression: `Object.values((${pdfComponentsExpression})[0].pdf._transport.commonObjs._objs)
               .find(entry => entry.data?.compiledGlyphs).data.getPathGenerator`,
             allowUnsafeEvalBlockedByCSP: false,
           });
@@ -237,6 +237,7 @@ export async function qualifyPreviews(cdp, origin, names, evidence, setPdfImageM
             const canvases = () => [...document.querySelectorAll('#pdfvuer canvas')];
             await wait(() => canvases().length === 2 && canvases().every(canvas => canvas.width > 0 && canvas.width !== ${previousWidth}), 'PDF resize dimensions');
             const ink = canvas => {
+              if (!canvas.width || !canvas.height) return 0;
               const pixels = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
               let count = 0;
               for (let i = 0; i < pixels.length; i += 4) if (pixels[i + 3] && pixels[i] < 200 && pixels[i + 1] < 200 && pixels[i + 2] < 200) count++;

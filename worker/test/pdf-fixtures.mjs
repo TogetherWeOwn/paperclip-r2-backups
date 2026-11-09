@@ -85,6 +85,26 @@ export async function embeddedPdf() {
   return Buffer.concat(chunks);
 }
 
+// Production Vue omits per-element debug links. Read the live rendered VNode
+// graph retained by app.mount instead; never patch the app or renderer state.
+export const pdfComponentsExpression = `(() => {
+  const found = [];
+  const seen = new Set();
+  const visit = node => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return;
+    seen.add(node);
+    if (node.component) {
+      const instance = node.component;
+      if (instance.type.createLoadingTask && instance.proxy.pdf) found.push(instance.proxy);
+      visit(instance.subTree);
+    }
+    if (Array.isArray(node.children)) node.children.forEach(visit);
+    if (node.suspense) visit(node.suspense.activeBranch);
+  };
+  visit(document.querySelector('#q-app').__vue_app__._container._vnode);
+  return found;
+})()`;
+
 export async function cachedPdfProbe(cdp, functionId) {
   const properties = await cdp.call("Runtime.getProperties", { objectId: functionId });
   const scopes = properties.internalProperties.find(property => property.name === "[[Scopes]]")?.value.objectId;
