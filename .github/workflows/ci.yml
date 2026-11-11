@@ -99,11 +99,23 @@ jobs:
           node --input-type=module <<'JS'
           import { execFileSync } from 'node:child_process';
           import assert from 'node:assert/strict';
-          const [major, minor] = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
-          assert.ok(major > 11 || (major === 11 && minor >= 19), 'npm with native release-age support required');
+          function eligible(version, config) {
+            const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+            if (!match) return false;
+            const [, major, minor] = match.map(Number);
+            return (major > 11 || (major === 11 && minor >= 19)) &&
+              config['min-release-age'] === 3 && config['ignore-scripts'] === true;
+          }
+          const policy = { 'min-release-age': 3, 'ignore-scripts': true };
+          assert.ok(eligible('11.19.0', policy));
+          assert.ok(!eligible('10.0.0', policy));
+          assert.ok(!eligible('11.18.9', policy));
+          assert.ok(!eligible('11.19.0-rc.1', policy));
+          assert.ok(!eligible('11.19.0', { ...policy, 'min-release-age': 0 }));
+          assert.ok(!eligible('11.19.0', { ...policy, 'ignore-scripts': false }));
+          const version = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim();
           const config = JSON.parse(execFileSync('npm', ['config', 'list', '--json'], { encoding: 'utf8' }));
-          assert.equal(config['min-release-age'], 3);
-          assert.equal(config['ignore-scripts'], true);
+          assert.ok(eligible(version, config), 'stable npm >=11.19.0 and native install policy required');
           JS
       - name: Clean frozen install with no lifecycle exceptions
         run: npm ci --no-audit --no-fund
