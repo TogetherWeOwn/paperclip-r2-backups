@@ -73,7 +73,7 @@ jobs:
   worker:
     name: Worker verification (no deploy)
     needs: changes
-    if: needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).worker
+    if: github.event_name != 'pull_request' || needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).worker
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -123,6 +123,7 @@ jobs:
       - name: Require successful checks or intentionally skipped fixtures
         env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 -I - <<'PY'
           import json, os
@@ -131,6 +132,6 @@ jobs:
           assert jobs['changes']['result'] == jobs['unit']['result'] == 'success', jobs
           outputs = jobs['changes']['outputs']
           areas = json.loads(outputs['areas'])
-          if outputs['full_run'] == 'true' or areas.get('worker', False):
+          if os.environ['EVENT_NAME'] != 'pull_request' or outputs['full_run'] == 'true' or areas.get('worker', False):
               assert jobs['worker']['result'] == 'success', jobs
           PY
