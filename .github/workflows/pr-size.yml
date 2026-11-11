@@ -64,9 +64,9 @@ jobs:
     if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || inputs.pr_number != ''
     permissions:
       contents: read
-      issues: write
-      pull-requests: write
-    uses: TogetherWeOwn/.github/.github/workflows/pr-size.yml@2ef8ad6447e11d019ac3098bcfd011193b75266a
+      issues: write # Post size labels and comments on issues.
+      pull-requests: write # Add size labels and comments to pull requests.
+    uses: TogetherWeOwn/.github/.github/workflows/pr-size.yml@2ef8ad6447e11d019ac3098bcfd011193b75266a # v0.10.0
     with:
       pr-number: ${{ inputs.pr_number || '' }}
       # This repo's generated paths, excluded on top of the script's
@@ -82,9 +82,9 @@ jobs:
     if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review' || inputs.pr_number != ''
     permissions:
       contents: read
-      issues: write
-      pull-requests: write
-    uses: TogetherWeOwn/.github/.github/workflows/pr-size-gate.yml@2ef8ad6447e11d019ac3098bcfd011193b75266a
+      issues: write # Post size labels and comments on issues.
+      pull-requests: write # Add size labels and comments to pull requests.
+    uses: TogetherWeOwn/.github/.github/workflows/pr-size-gate.yml@2ef8ad6447e11d019ac3098bcfd011193b75266a # v0.10.0
     with:
       pr-number: ${{ inputs.pr_number || '' }}
       exclude-extra: ""
@@ -94,6 +94,6 @@ jobs:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.pr_number == '')
     permissions:
       contents: read
-      issues: read
-      pull-requests: read
-    uses: TogetherWeOwn/.github/.github/workflows/pr-size-weekly.yml@2ef8ad6447e11d019ac3098bcfd011193b75266a
+      issues: read # Read issue labels for the weekly tally.
+      pull-requests: read # Read pull-request sizes for the weekly tally.
+    uses: TogetherWeOwn/.github/.github/workflows/pr-size-weekly.yml@2ef8ad6447e11d019ac3098bcfd011193b75266a # v0.10.0
