@@ -39,7 +39,7 @@ jobs:
   restore-fixtures:
     name: Offsite restore fixtures
     needs: changes
-    if: needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).backup
+    if: github.event_name != 'pull_request' || needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).backup
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -80,10 +80,17 @@ jobs:
       - name: Require successful checks or intentionally skipped fixtures
         env:
           NEEDS: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 -I - <<'PY'
           import json, os
           jobs = json.loads(os.environ['NEEDS'])
           assert all(j['result'] in ('success', 'skipped') for j in jobs.values()), jobs
           assert jobs['changes']['result'] == jobs['unit']['result'] == 'success', jobs
+          outputs = jobs['changes']['outputs']
+          selected = (os.environ['EVENT_NAME'] != 'pull_request'
+                      or outputs['full_run'] == 'true'
+                      or json.loads(outputs['areas'])['backup'])
+          if selected:
+              assert jobs['restore-fixtures']['result'] == 'success', jobs
           PY
