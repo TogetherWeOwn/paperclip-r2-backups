@@ -13,6 +13,7 @@ install -m 0755 "$here/paperclip_r2_backup.py" "$bin_dir/paperclip_r2_backup.py"
 install -m 0644 "$here/database_snapshots.py" "$bin_dir/database_snapshots.py"
 install -m 0644 "$here/operation_lock.py" "$bin_dir/operation_lock.py"
 install -m 0644 "$here/local_measurement.py" "$bin_dir/local_measurement.py"
+install -m 0644 "$here/attachments.py" "$bin_dir/attachments.py"
 install -m 0644 "$here/systemd/paperclip-r2-backup.service" "$unit_dir/"
 install -m 0644 "$here/systemd/paperclip-r2-backup.timer" "$unit_dir/"
 
