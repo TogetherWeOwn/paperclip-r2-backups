@@ -23,6 +23,7 @@ import tarfile
 import tempfile
 from dataclasses import dataclass, field
 
+import attachments
 import database_snapshots as snapshots
 from operation_lock import LockError, operation_lock
 
@@ -34,7 +35,8 @@ STATUS_KEY = "status/last-run.json"
 # Only these prefixes may ever be deleted from. Everything else in the bucket
 # (for example legacy data/ and ops/) is off limits.
 DELETABLE_PREFIXES = (DB_PREFIX, INSTANCE_PREFIX, *snapshots.PREFIXES)
-MANAGED_PREFIXES = (*DELETABLE_PREFIXES, STATUS_PREFIX)
+# attachments/ is managed (inventoried, cap-counted) but never deletable.
+MANAGED_PREFIXES = (*DELETABLE_PREFIXES, STATUS_PREFIX, attachments.DEST_PREFIX)
 
 DB_NAME_RE = re.compile(r"^paperclip-\d{8}-\d{6}\.sql\.gz$")
 TS_RE = re.compile(r"(\d{8})-(\d{6})")
@@ -110,6 +112,7 @@ class Config:
     sources: tuple[snapshots.Source, ...] = ()
     receipt_dir: str = ""
     restore_weekday: int = 6  # Sunday UTC, inside the existing daily timer
+    attachments_source: str = ""  # bucket/prefix/ of Paperclip object storage; empty = off
 
     def __post_init__(self):
         validate_bucket(self.bucket)
@@ -153,6 +156,7 @@ def load_config(env: dict | None = None) -> Config:
         rclone_bin=env.get("RCLONE_BIN", "rclone"),
         sources=snapshots.load_sources(env) if _bool(env.get("SNAPSHOT_BACKUPS")) else (),
         restore_weekday=weekday,
+        attachments_source=env.get("ATTACHMENTS_SOURCE", "").strip(),
         receipt_dir=os.path.expanduser(env.get("RESTORE_RECEIPT_DIR") or
                                       os.path.join(home, ".local/state/paperclip-r2-backup/receipts")),
     )
@@ -594,7 +598,7 @@ def inventory_state(rc) -> tuple[int, dict]:
     return bucket_bytes, existing
 
 
-def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
+def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False, mirror=None) -> int:
     now = now.astimezone(dt.timezone.utc)
     clock_start = snapshots.utc_now() if not dry_run else now
     start_tick = snapshots.time.monotonic()
@@ -780,6 +784,27 @@ def run(cfg: Config, rc, now: dt.datetime, dry_run: bool = False) -> int:
         # Apply exactly the plan credited by capacity admission. The refreshed
         # freshness clock may cross a GFS boundary and change which bytes expire.
         apply_retention(plans, rc, status, dry_run)
+        # e) attachment mirror, only after the database backup fully succeeded
+        if mirror is not None:
+            objects = rc.bucket_inventory()
+            physical = sum(o.size for o in objects)
+            # Live: the fresh physical inventory already holds this run's uploads and
+            # deletions. Dry-run uploaded nothing, so admit against the simulated
+            # post-upload/post-retention size credited by the admission above.
+            base = projected if dry_run else physical
+
+            def receipt_growth(summary: dict) -> int:
+                receipt = dict(status, ok=True, exit_code=EXIT_OK, error=None,
+                               dry_run=False, attachments=summary)
+                return max(0, snapshots.status_replacement_bytes(
+                    objects, STATUS_KEY, status_data(receipt)) - physical)
+
+            try:
+                status["attachments"] = attachments.mirror(
+                    mirror, cfg.cap_bytes, base, _ensure_dir(cfg.tmp_dir), dry_run, log,
+                    reserve=receipt_growth)
+            except attachments.AttachmentError as exc:
+                raise BackupError(f"attachments: {exc}") from None
         status["ok"] = True
         status["exit_code"] = code = EXIT_OK
     except _Stop:
@@ -844,17 +869,25 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config()
         rc = Rclone(cfg.bucket, cfg.rclone_bin)
         now = dt.datetime.now(dt.timezone.utc)
+
+        def build_mirror():
+            # Only backup and dry-run need the source; restore drills never do.
+            if not cfg.attachments_source:
+                return None
+            return attachments.Mirror(cfg.attachments_source, cfg.bucket, dict(os.environ),
+                                      cfg.rclone_bin)
+
         if dry_run:
-            return run(cfg, rc, now, True)
+            return run(cfg, rc, now, True, build_mirror())
         # Shared lock protects retention/download and prevents overlapping source dumps.
         with operation_lock(os.path.join(_ensure_dir(cfg.tmp_dir), "operation.lock")):
             if "--restore-drill" in argv:
                 return snapshots.drill(cfg, rc, now)
-            code = run(cfg, rc, now)
+            code = run(cfg, rc, now, mirror=build_mirror())
             if code == EXIT_OK and cfg.sources and now.weekday() == cfg.restore_weekday:
                 return snapshots.drill(cfg, rc, dt.datetime.now(dt.timezone.utc))
             return code
-    except (BackupError, snapshots.SnapshotError, LockError) as exc:
+    except (BackupError, snapshots.SnapshotError, LockError, attachments.AttachmentError) as exc:
         log(f"error: {exc}")
         return EXIT_ERROR
 
