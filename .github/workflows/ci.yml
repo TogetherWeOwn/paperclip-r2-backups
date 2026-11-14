@@ -70,10 +70,74 @@ jobs:
           path: artifacts/*.json
           retention-days: 14
           if-no-files-found: warn
+  worker-controls:
+    name: Worker control fixtures
+    needs: changes
+    if: needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).worker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Select preinstalled Node 24 without installing tools
+        shell: bash
+        run: |
+          mapfile -t bins < <(find "$RUNNER_TOOL_CACHE/node" -path '*/24.*/x64/bin' -type d | sort -V)
+          test "${#bins[@]}" -gt 0
+          printf '%s\n' "${bins[-1]}" >> "$GITHUB_PATH"
+      - name: Finite control fixtures (no dependency install)
+        run: node --test worker/test/control.test.mjs
+  worker:
+    name: Worker verification (no deploy)
+    needs: changes
+    if: (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (needs.changes.outputs.full_run == 'true' || fromJSON(needs.changes.outputs.areas).worker)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: worker
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Select preinstalled Node 24 without installing tools
+        shell: bash
+        run: |
+          mapfile -t bins < <(find "$RUNNER_TOOL_CACHE/node" -path '*/24.*/x64/bin' -type d | sort -V)
+          test "${#bins[@]}" -gt 0
+          printf '%s\n' "${bins[-1]}" >> "$GITHUB_PATH"
+      - name: Verify native install policy before clean install
+        run: |
+          node --version
+          npm --version
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import assert from 'node:assert/strict';
+          const [major, minor] = execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
+          assert.ok(major > 11 || (major === 11 && minor >= 19), 'npm with native release-age support required');
+          const config = JSON.parse(execFileSync('npm', ['config', 'list', '--json'], { encoding: 'utf8' }));
+          assert.equal(config['min-release-age'], 3);
+          assert.equal(config['ignore-scripts'], true);
+          JS
+      - name: Clean frozen install with no lifecycle exceptions
+        run: npm ci --no-audit --no-fund
+      - name: Confirm manifest and lock graph were not changed
+        run: git diff --exit-code -- package.json package-lock.json
+      - name: Typecheck and finite mocked integration fixtures
+        run: |
+          npm run typecheck
+          node --experimental-test-module-mocks --test test/*.test.mjs
+      - name: Non-deploy Worker build
+        run: npm run build
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [changes, security, unit, restore-fixtures]
+    needs: [changes, security, unit, restore-fixtures, worker-controls, worker]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

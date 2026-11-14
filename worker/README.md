@@ -24,6 +24,10 @@ Security layers:
 6. Static dashboard files are served by the Worker itself (`env.ASSETS.fetch`) after the
    checks above, because R2-Explorer 1.2.0 does not serve them and `run_worker_first`
    bypasses the asset layer. Only `/api/*` goes to R2-Explorer.
+7. Authenticated JSON controls have a 4 MiB inclusive actual-byte budget and a 10-second
+   read deadline. Invalid or out-of-budget controls get a fixed, no-store failure, without
+   logging request contents. These limits also apply with `WRITE_PREFIXES=*`. Binary
+   object and part uploads remain streaming; their bodies do not enter the JSON reader.
 
 `workers_dev` and `preview_urls` are false, so there is no public `*.workers.dev` URL.
 The config contains no routes, domains or account ids.
@@ -32,15 +36,17 @@ The config contains no routes, domains or account ids.
 
 ```bash
 cd worker
-npm ci
-npx tsc --noEmit                         # typecheck
-npx wrangler deploy --dry-run --outdir dist   # build check, no network deploy
-
-# Access settings (see below), then:
-npx wrangler login                        # or export CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
-npx wrangler deploy
-printf '%s' '<TEAM_NAME>' | npx wrangler secret put ACCESS_TEAM_NAME
-printf '%s' '<AUD_TAG>'   | npx wrangler secret put ACCESS_AUD
+# CI performs typecheck, fixtures and the dry-run build.
+# Use Node 24 / npm 11.19+ with the native policy below before installing.
+test "$(npm config get min-release-age)" = 3
+test "$(npm config get ignore-scripts)" = true
+npm ci --no-audit --no-fund
+# A production deployment requires separate release approval and qualification.
+# Access settings (see below), then use only the installed, locked CLI:
+./node_modules/.bin/wrangler login         # or export CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
+./node_modules/.bin/wrangler deploy
+printf '%s' '<TEAM_NAME>' | ./node_modules/.bin/wrangler secret put ACCESS_TEAM_NAME
+printf '%s' '<AUD_TAG>'   | ./node_modules/.bin/wrangler secret put ACCESS_AUD
 ```
 
 Then attach a custom domain to the Worker (dashboard: Worker, Settings, Domains and Routes,
@@ -78,7 +84,37 @@ or the Workers Domains API) for a hostname in a zone on your account.
   request counts (100k/day) are ample here.
 - Folder rename is not implemented by R2-Explorer (roadmap). Rename/move works per file,
   moving a "folder" means moving each object. Move is copy then delete.
-- Listings are paginated by R2 (1000 keys per page).
+- Listings are paginated by R2 (1000 keys per page). API query strings are limited to
+  8,192 UTF-8 bytes (excluding `?`). `include` uses repeated query names, at most 16
+  values of at most 64 UTF-8 bytes each; supported values are `httpMetadata` and
+  `customMetadata`, not CSV or JSON-packed lists.
+- Multipart completion accepts 1–10,000 entries, integer part numbers 1–10,000, and
+  opaque etags of at most 256 UTF-8 bytes. Entry order and etag contents are preserved.
+  Control keys are limited to 1,024 decoded UTF-8 bytes / 4,096 encoded bytes, and upload
+  identifiers to 2,048 UTF-8 bytes. Folder key budgets include the trailing `/` added
+  by the integration. Supported dashboard JSON with charset and identity
+  encoding is retained; other JSON content encodings receive 415.
+- These are per-request control budgets, not a total-isolate memory, concurrency or
+  rate limit. They do not establish the safety or identity of a deployed Worker.
 - The dashboard UI still shows Share, Email and "public URL" entries; the Worker answers 404 for them.
 - R2-Explorer is pinned exactly; upgrade deliberately and re-check that write routes
-  (`writeTargets` in `src/index.ts`) still match `node_modules/r2-explorer/dist/index.mjs`.
+  (`writeTargets` in `src/index.ts`), JSON controls (`controlRoute` in `src/control.ts`)
+  and query representation still match `node_modules/r2-explorer/dist/index.mjs` and
+  Chanfana. Request bounds are not a dependency upgrade or advisory remediation.
+
+## Non-deploy verification
+
+GitHub Actions runs finite control fixtures even on drafts. On ready PRs and main,
+Worker verification uses preinstalled Node 24 / npm 11.19+; it fails rather than
+installing or silently accepting an unsupported native policy. `worker/.npmrc`
+sets a three-day minimum release age and disables lifecycle scripts. The unchanged
+lock graph is installed with `npm ci --no-audit --no-fund`; no hook exceptions are
+allowed (locked hook candidates: esbuild, workerd, and optional macOS fsevents).
+Existing locks are not a retrospective release-age or provenance audit.
+
+The verification job explicitly runs `npm run typecheck`,
+`node --experimental-test-module-mocks --test test/*.test.mjs` and `npm run build`
+(Wrangler dry-run only). Fixtures use mocked Access certs and R2, never a live bucket.
+Full-suite output and dry-run build results are CI evidence only for the exact head
+that ran them; a skipped draft job is not Worker verification. No deployment,
+Access configuration change or dependency refresh is performed by these jobs.
