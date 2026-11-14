@@ -1,0 +1,19 @@
+# Highest changed-path tier wins; unmatched paths are sensitive.
+# For renames, classify both the old and new paths.
+# Content triggers override paths: input/endpoints, auth, cryptography, secrets,
+# permissions, personal or tenant data, schemas, dependencies, CI, and weakened
+# tests or gates are sensitive even in an otherwise lower-tier file.
+version: 1
+default_tier: sensitive
+tiers:
+  low: [] # No audited prose or fixtures are safe to classify lower yet.
+  ordinary: []
+  sensitive:
+    - .github/**
+    - backup/**
+    - worker/**
+    - docs/**
+    - README.md
+    - AGENTS.md
+    - CLAUDE.md
+    - .claude/**
