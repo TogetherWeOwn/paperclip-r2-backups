@@ -33,6 +33,7 @@ class RestoreFixtureSelectionTests(unittest.TestCase):
                         'unit': {'result': 'success'},
                         'security': {'result': 'success'},
                         'restore-fixtures': {'result': result},
+                        'worker': {'result': 'success'},
                     }
                     with patch.dict(os.environ, {'NEEDS': json.dumps(jobs), 'EVENT_NAME': event}):
                         if result == 'failure' or (selected and result == 'skipped'):
