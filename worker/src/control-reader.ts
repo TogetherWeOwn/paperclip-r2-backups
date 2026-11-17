@@ -57,6 +57,7 @@ export async function readControl(
       if (Date.now() >= deadline) throw new ControlError(408);
       const { done, value } = await reader.read();
       if (interrupted) throw interrupted;
+      if (Date.now() >= deadline) throw new ControlError(408);
       if (done) {
         complete = true;
         return used === storage.byteLength ? storage : storage.slice(0, used);

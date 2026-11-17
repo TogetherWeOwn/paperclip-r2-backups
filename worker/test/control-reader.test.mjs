@@ -116,6 +116,28 @@ test("reader storage grows with actual bytes and returns an exact-size buffer", 
   } finally { allocation.mock.restore(); }
 });
 
+test("identity encoding is accepted without cloning or parsing the request", async () => {
+  const request = streamRequest([bytes('{}')], { "content-encoding": " IdEnTiTy " });
+  request.clone = () => { throw new Error("clone must not be used"); };
+  request.json = () => { throw new Error("json must not be used"); };
+  assert.deepEqual(parseBytes(await readControl(request, limits)), {});
+  assert.equal(request.body.locked, false);
+});
+
+test("deadline is enforced when a pending read completes before the timer callback", async () => {
+  for (const chunk of [null, bytes('{}')]) {
+    let now = 0;
+    const request = new Request("https://console.example", {
+      method: "POST", duplex: "half",
+      body: new ReadableStream({ pull(c) { now = 5; if (chunk) c.enqueue(chunk); else c.close(); } }, { highWaterMark: 0 }),
+    });
+    const clock = mock.method(Date, "now", () => now);
+    try { await assert.rejects(readControl(request, { bytes: 32, milliseconds: 5 }), rejected(408)); }
+    finally { clock.mock.restore(); }
+    assert.equal(request.body.locked, false);
+  }
+});
+
 test("absolute read deadline also covers a finite sequence of empty chunks", async () => {
   const req = streamRequest(Array.from({ length: 32 }, () => new Uint8Array()));
   let now = 0;
