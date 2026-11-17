@@ -138,6 +138,19 @@ test("deadline is enforced when a pending read completes before the timer callba
   }
 });
 
+test("abort before and at the deadline preserves first failure", async () => {
+  for (const [now, status] of [[4, 400], [5, 408]]) {
+    let time = 0;
+    const abort = new AbortController();
+    const request = new Request("https://console.example", { method: "POST", duplex: "half", signal: abort.signal,
+      body: new ReadableStream({ pull() { time = now; abort.abort(); } }, { highWaterMark: 0 }) });
+    const clock = mock.method(Date, "now", () => time);
+    try { await assert.rejects(readControl(request, { bytes: 32, milliseconds: 5 }), rejected(status)); }
+    finally { clock.mock.restore(); }
+    assert.equal(request.body.locked, false);
+  }
+});
+
 test("a read rejection after the deadline reports timeout", async () => {
   let now = 0;
   const request = new Request("https://console.example", {

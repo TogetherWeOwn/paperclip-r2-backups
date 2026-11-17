@@ -121,6 +121,8 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Confirm manifest and lock graph were not changed
         run: git diff --exit-code -- package.json package-lock.json
+      - name: Control header validation regressions
+        run: node --test test/control-headers.test.mjs
       - name: Bounded control reader regressions
         run: node --test test/control-reader.test.mjs
       - name: Typecheck Worker

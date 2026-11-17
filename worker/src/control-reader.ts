@@ -1,15 +1,11 @@
+import { checkControlHeaders, ControlError } from "./control-headers.ts";
+
+export { ControlError } from "./control-headers.ts";
+
 export const CONTROL_LIMITS = Object.freeze({
   bytes: 4 * 1024 * 1024,
   milliseconds: 10_000,
 });
-
-export class ControlError extends Error {
-  readonly status: number;
-  constructor(status: number) {
-    super("Control request rejected");
-    this.status = status;
-  }
-}
 
 function invalid(): never {
   throw new ControlError(400);
@@ -20,21 +16,7 @@ export async function readControl(
   request: Request,
   limits: { bytes: number; milliseconds: number } = CONTROL_LIMITS,
 ): Promise<Uint8Array> {
-  const cancelBody = () => { void request.body?.cancel().catch(() => {}); };
-  const encoding = request.headers.get("content-encoding");
-  if (encoding !== null && encoding.trim().toLowerCase() !== "identity") {
-    cancelBody();
-    throw new ControlError(415);
-  }
-  const length = request.headers.get("content-length");
-  if (length !== null && !/^\d+$/.test(length)) {
-    cancelBody();
-    invalid();
-  }
-  if (length !== null && Number(length) > limits.bytes) {
-    cancelBody();
-    throw new ControlError(413);
-  }
+  checkControlHeaders(request, limits.bytes);
   if (!request.body) invalid();
   const reader = request.body.getReader();
   let storage = new Uint8Array(Math.min(limits.bytes, 1024));
@@ -48,7 +30,7 @@ export async function readControl(
   };
   const deadline = Date.now() + limits.milliseconds;
   const timer = setTimeout(() => interrupt(408), limits.milliseconds);
-  const onAbort = () => interrupt(400);
+  const onAbort = () => interrupt(Date.now() >= deadline ? 408 : 400);
   request.signal.addEventListener("abort", onAbort, { once: true });
   if (request.signal.aborted) onAbort();
   try {
