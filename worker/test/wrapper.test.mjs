@@ -85,6 +85,13 @@ test("write authorization retains source/destination and unknown-field semantics
   await denied(request(path("delete"), { body: { key: "%%%" } }), 400);
   await denied(request(path("unknown/route"), { body: {} }), 403);
   await denied(request(path(encode("outside/write")), { body: { customMetadata: {}, httpMetadata: {} } }), 403);
+  for (const separator of ["%0A", "%0D", "%E2%80%A8", "%E2%80%A9"]) {
+    const key = encode("outside/write");
+    const route = path(key.slice(0, 4) + separator + key.slice(4));
+    const body = { customMetadata: {}, httpMetadata: {} };
+    await denied(request(route, { body }), separator.startsWith("%E2") ? 400 : 403);
+    await denied(request(route, { body, headers: { "content-type": "text/plain" } }), 403);
+  }
   assert.equal((await run(request(path("folder"), { body: { key: encode("db/write") }, headers: { origin: "", "sec-fetch-site": "same-origin" } }))).status, 200);
 });
 

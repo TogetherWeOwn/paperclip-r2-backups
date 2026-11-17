@@ -106,7 +106,7 @@ const fromB64 = decodedKey;
  */
 function writeTargets(req: Request, url: ControlUrl, body?: Record<string, unknown>): string[] | null {
   if (req.method !== "POST" && req.method !== "PUT" && req.method !== "DELETE") return null;
-  const m = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/);
+  const m = url.pathname.match(/^\/api\/buckets\/[^/]+\/([\s\S]+)$/);
   if (!m) return null;
   const rest = m[1];
   if (rest === "upload" || rest === "multipart/create" || rest === "multipart/upload") {
@@ -151,7 +151,7 @@ function csrfError(req: Request, url: ControlUrl): string | null {
   } else if (req.headers.get("origin") !== url.origin) {
     return "write request without a same-origin Origin blocked";
   }
-  const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/)?.[1];
+  const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/([\s\S]+)$/)?.[1];
   const jsonRoute = rest !== undefined && (JSON_WRITE_ROUTES.includes(rest) || (!rest.includes("/") && rest !== "upload"));
   if (jsonRoute && !(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
     return "JSON content type required";
