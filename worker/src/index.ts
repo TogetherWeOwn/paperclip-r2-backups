@@ -1,4 +1,9 @@
 import { R2Explorer } from "r2-explorer";
+import { ControlError } from "./control-headers.ts";
+import { readControl } from "./control-reader.ts";
+import { replayControl } from "./control-replay.ts";
+import { checkQuery, controlRoute, controlUrl, type ControlUrl } from "./control-routing.ts";
+import { checkControl, decodedKey, parseControl, VALIDATION_LIMITS } from "./control-validation.ts";
 
 interface Env {
   ASSETS: Fetcher;
@@ -92,22 +97,26 @@ async function verifyAccessJwt(token: string, team: string, aud: string): Promis
 const deny = (status: number, msg: string) =>
   new Response(msg, { status, headers: { "cache-control": "no-store", "content-type": "text/plain" } });
 
-const fromB64 = (s: string | null | undefined): string | null => {
-  if (!s) return null;
+const controlFailure = (status: number) => deny(status, "Control request rejected");
+const fromB64 = decodedKey;
+
+function metadataKey(raw: string): string | null {
+  if (raw.length > VALIDATION_LIMITS.encodedKeyBytes || new TextEncoder().encode(raw).byteLength > VALIDATION_LIMITS.encodedKeyBytes) return null;
   try {
-    return decodeURIComponent(escape(atob(s)));
+    const param = decodeURIComponent(raw);
+    return fromB64(param) ?? fromB64(decodeURIComponent(param));
   } catch {
     return null;
   }
-};
+}
 
 /**
  * Keys a request would modify, derived from R2-Explorer's write endpoints.
  * Returns null for non-write requests, [] for a write we cannot attribute (denied).
  */
-async function writeTargets(req: Request, url: URL): Promise<string[] | null> {
+function writeTargets(req: Request, url: ControlUrl, body?: Record<string, unknown>): string[] | null {
   if (req.method !== "POST" && req.method !== "PUT" && req.method !== "DELETE") return null;
-  const m = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/);
+  const m = url.pathname.match(/^\/api\/buckets\/[^/]+\/([\s\S]+)$/);
   if (!m) return null;
   const rest = m[1];
   if (rest === "upload" || rest === "multipart/create" || rest === "multipart/upload") {
@@ -115,28 +124,17 @@ async function writeTargets(req: Request, url: URL): Promise<string[] | null> {
     return k === null ? [] : [k];
   }
   if (["move", "copy", "folder", "delete", "multipart/complete"].includes(rest)) {
-    let body: Record<string, string>;
-    try {
-      body = (await req.clone().json()) as Record<string, string>;
-    } catch {
-      return [];
-    }
-    const fields = ["key", "oldKey", "newKey", "sourceKey", "destinationKey"];
-    // A copy only reads the source; every other field is modified.
-    const keys = fields
-      .filter((f) => f in body && !(rest === "copy" && f === "sourceKey"))
-      .map((f) => fromB64(body[f]));
+    if (!body) return [];
+    // Match the pinned schemas' unknown-field stripping. A copy only reads its source.
+    const fields = rest === "move" ? ["oldKey", "newKey"]
+      : rest === "copy" ? ["destinationKey"] : ["key"];
+    const keys = fields.map((f) => fromB64(body[f]));
     return keys.some((k) => k === null) || keys.length === 0 ? [] : (keys as string[]);
   }
   // POST /api/buckets/:bucket/:key  (metadata edit)
   if (req.method === "POST" && !rest.includes("/")) {
-    let k: string | null;
-    try {
-      k = fromB64(decodeURIComponent(rest));
-    } catch {
-      k = null;
-    }
-    return k === null ? [] : [k];
+    const key = metadataKey(rest);
+    return key === null ? [] : [key];
   }
   return [];
 }
@@ -150,7 +148,7 @@ const JSON_WRITE_ROUTES = ["move", "copy", "folder", "delete", "multipart/comple
  * Allow only same-origin requests: Sec-Fetch-Site must be "same-origin", or, when the
  * browser does not send it, Origin must equal this Worker's origin.
  */
-function csrfError(req: Request, url: URL): string | null {
+function csrfError(req: Request, url: ControlUrl): string | null {
   if (req.method === "GET" || req.method === "HEAD" || req.method === "OPTIONS") return null;
   const site = req.headers.get("sec-fetch-site");
   if (site !== null) {
@@ -158,7 +156,7 @@ function csrfError(req: Request, url: URL): string | null {
   } else if (req.headers.get("origin") !== url.origin) {
     return "write request without a same-origin Origin blocked";
   }
-  const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/)?.[1];
+  const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/([\s\S]+)$/)?.[1];
   const jsonRoute = rest !== undefined && (JSON_WRITE_ROUTES.includes(rest) || (!rest.includes("/") && rest !== "upload"));
   if (jsonRoute && !(req.headers.get("content-type") ?? "").toLowerCase().startsWith("application/json")) {
     return "JSON content type required";
@@ -191,7 +189,12 @@ export default {
     }
     if (err) return deny(403, `Invalid Cloudflare Access token: ${err}`);
 
-    const url = new URL(request.url);
+    let url: ControlUrl;
+    try {
+      url = controlUrl(request.url);
+    } catch (error) {
+      return controlFailure(error instanceof ControlError ? error.status : 500);
+    }
 
     // Public, unauthenticated share links would bypass Access: disabled entirely.
     // They also write .r2-explorer/ objects into the bucket. No email handler either.
@@ -206,13 +209,42 @@ export default {
     const csrf = csrfError(request, url);
     if (csrf) return deny(403, csrf);
 
+    // Bound controls after auth/CSRF, before any helper or Explorer reads a body.
+    let body: Record<string, unknown> | undefined;
+    let delegated = request;
+    try {
+      checkQuery(url);
+      const route = controlRoute(request.method, url);
+      if (route) {
+        const bytes = await readControl(request);
+        body = parseControl(bytes);
+        checkControl(route, body);
+        delegated = replayControl(request, bytes);
+      }
+      const binaryRoute = request.method === "POST"
+        && /^\/api\/buckets\/[^/]+\/(upload|multipart\/(create|upload))$/.test(url.pathname);
+      if (binaryRoute) {
+        if (fromB64(url.searchParams.get("key")) === null) throw new ControlError(400);
+        if (url.pathname.endsWith("/multipart/upload")) {
+          const id = url.searchParams.get("uploadId");
+          const part = url.searchParams.get("partNumber");
+          if (id === null || new TextEncoder().encode(id).byteLength > VALIDATION_LIMITS.uploadIdBytes
+            || part === null || !/^\d+$/.test(part) || Number(part) < 1
+            || Number(part) > VALIDATION_LIMITS.parts) throw new ControlError(400);
+        }
+      }
+      if (route === "metadata" && metadataKey(url.pathname.split("/").pop()!) === null) throw new ControlError(400);
+    } catch (error) {
+      return controlFailure(error instanceof ControlError ? error.status : 500);
+    }
+
     // Keep the console inside the managed prefixes unless explicitly widened.
     const allowed = (env.WRITE_PREFIXES ?? DEFAULT_WRITE_PREFIXES)
       .split(",")
       .map((p) => p.trim())
       .filter(Boolean);
     if (!allowed.includes("*")) {
-      const targets = await writeTargets(request, url);
+      const targets = writeTargets(request, url, body);
       if (targets !== null) {
         if (targets.length === 0) return deny(403, "Write target could not be determined");
         const bad = targets.find((k) => !allowed.some((p) => k.startsWith(p)));
@@ -228,6 +260,6 @@ export default {
       return env.ASSETS.fetch(request);
     }
 
-    return explorer.fetch(request, env, ctx);
+    return explorer.fetch(delegated, env, ctx);
   },
 };
