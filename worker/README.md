@@ -28,6 +28,21 @@ Security layers:
 `workers_dev` and `preview_urls` are false, so there is no public `*.workers.dev` URL.
 The config contains no routes, domains or account ids.
 
+## Dependency policy
+
+Use stable npm 11.19.0 or newer for dependency work; 11.19.0 is the verified
+baseline. The Worker configuration sets `min-release-age=3` days and
+`ignore-scripts=true`, with no lifecycle-script exceptions. CI verifies the
+actual npm version and effective settings before its clean install; managed
+hosts are expected to use the same supported policy. The age setting does not
+retroactively audit versions already present in the lockfile.
+
+Unsupported local npm clients are outside this enforcement boundary. The
+`engines` declaration advertises the minimum version, and newer clients may
+refuse unsupported versions, but this is not universal pre-resolution
+protection: older npm can resolve dependencies before checking engines. A
+warning or later refusal does not undo that resolution.
+
 ## Deploy
 
 ```bash
