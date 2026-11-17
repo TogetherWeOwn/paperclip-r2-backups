@@ -73,6 +73,8 @@ export async function readControl(
     }
   } catch (error) {
     if (error instanceof ControlError) throw error;
+    if (interrupted) throw interrupted;
+    if (Date.now() >= deadline) throw new ControlError(408);
     throw new ControlError(400);
   } finally {
     clearTimeout(timer);

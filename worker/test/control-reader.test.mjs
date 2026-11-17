@@ -138,6 +138,18 @@ test("deadline is enforced when a pending read completes before the timer callba
   }
 });
 
+test("a read rejection after the deadline reports timeout", async () => {
+  let now = 0;
+  const request = new Request("https://console.example", {
+    method: "POST", duplex: "half",
+    body: new ReadableStream({ pull(c) { now = 5; c.error(new Error("private detail")); } }, { highWaterMark: 0 }),
+  });
+  const clock = mock.method(Date, "now", () => now);
+  try { await assert.rejects(readControl(request, { bytes: 32, milliseconds: 5 }), rejected(408)); }
+  finally { clock.mock.restore(); }
+  assert.equal(request.body.locked, false);
+});
+
 test("absolute read deadline also covers a finite sequence of empty chunks", async () => {
   const req = streamRequest(Array.from({ length: 32 }, () => new Uint8Array()));
   let now = 0;
