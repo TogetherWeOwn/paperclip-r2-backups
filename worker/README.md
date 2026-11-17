@@ -20,14 +20,14 @@ Security layers:
    Set `WRITE_PREFIXES=*` to lift the prefix restriction only, not the control bounds below.
 5. CSRF: every request other than GET/HEAD/OPTIONS must be same-origin (`Sec-Fetch-Site:
    same-origin`, or `Origin` equal to the Worker origin when that header is absent), and the
-   JSON write routes require an `application/json` content type (charset parameters are supported).
-   Otherwise 403.
+   JSON write routes require a `Content-Type` header starting with `application/json`
+   (case-insensitive, so charset parameters are supported). Otherwise 403.
 6. Static dashboard files are served by the Worker itself (`env.ASSETS.fetch`) after the
    checks above, because R2-Explorer 1.2.0 does not serve them and `run_worker_first`
    bypasses the asset layer. Only `/api/*` goes to R2-Explorer.
 
-`workers_dev` and `preview_urls` are false, so there is no public `*.workers.dev` URL.
-The config contains no routes, domains or account ids.
+The checked-in Wrangler config disables `workers_dev` and `preview_urls` and
+does not specify routes, domains, or an account ID.
 
 ## Dependency policy
 
@@ -75,7 +75,9 @@ cd worker &&
 Proceed only after that succeeds. From `worker/`, use the installed, locked
 Wrangler, not a CLI fetched on demand. Use existing authorized Cloudflare
 credentials or, if interactive login is authorized, `./node_modules/.bin/wrangler login`.
-Run deployment and secret updates only when separately authorized:
+For token-based deployments, set `CLOUDFLARE_ACCOUNT_ID` to the intended account.
+Verify the target account before running any separately authorized deployment or
+secret update:
 
 ```bash
 ./node_modules/.bin/wrangler deploy
@@ -132,7 +134,7 @@ controls before handing requests to R2-Explorer. These checks still apply with
   `partNumber` from **1–10,000** and an opaque `etag` string of at most **256
   UTF-8 bytes**. The wrapper preserves entry order and etag contents. The
   `uploadId` is capped at **2,048 UTF-8 bytes** for completion and part uploads.
-  Part uploads carry `partNumber` as a decimal query value in the same range.
+  Part uploads carry `partNumber` as a digits-only query value in the same range.
 
 Wrapper control rejections use a fixed `Control request rejected` response with
 `Cache-Control: no-store` and do not log request contents. Invalid controls
@@ -146,7 +148,9 @@ The `POST` object upload, multipart creation, and part upload routes bypass the
 JSON body reader. Their query inputs are still checked, and object and part
 bodies pass through as streams. Multipart **completion** is a bounded JSON
 control, not a part upload. The wrapper passes Explorer download responses
-through without buffering them. Cloudflare and R2 limits still apply to transfers.
+through without buffering them. Cloudflare's plan-specific request-body limit
+still applies to each single object upload and to each multipart part; R2 limits
+also apply.
 
 These are per-request control limits, not a total isolate memory budget,
 concurrency cap, rate limit, or end-to-end deadline. They do not establish the
