@@ -55,7 +55,7 @@ test("pinned Explorer resolves double-encoded metadata keys under wildcard and m
     assert.equal(response.status, 200);
   }
   assert.deepEqual(calls, [["get", "db/a"], ["put", "db/a"], ["get", "db/a"], ["put", "db/a"]]);
-  assert.equal((await run(request(route("outside/a"), { body }), noR2)).status, 403);
+  assert.equal((await run(request(route("outside/ax"), { body }), noR2)).status, 403);
   assert.equal((await run(request(route("db/" + "a".repeat(1022)), { body }), noR2)).status, 400);
 });
 
