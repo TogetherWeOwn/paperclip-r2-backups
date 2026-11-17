@@ -8,25 +8,26 @@ Security layers:
 
 1. A Cloudflare Access self-hosted app in front of the custom domain (identity provider and policy).
 2. This Worker validates the `Cf-Access-Jwt-Assertion` header on **every** request (static
-   files included): RS256 signature against the team certs, `iss`, `aud`, `exp`, `nbf`.
-   Missing or invalid token gives 403. If the secrets below are unset it fails closed (500).
+   files included): RS256 signature against the team certs, `iss`, `aud`, `exp`, and numeric
+   `nbf` when present (`exp` and `nbf` allow 30 seconds of clock skew). A missing token or
+   failed validation is denied; the Worker fails closed if Access settings are unset.
    R2-Explorer's own `cfAccessTeamName` option is not used because it only covers `/api/*`
    and does not check the AUD.
 3. Public share links (`/share/*`, share create/list/delete) and the email API are disabled,
    since a share link would bypass Access.
 4. Writes are limited to `WRITE_PREFIXES` (default `db/,instance/,status/`), so the console
    cannot modify other objects in the bucket by accident. Reads and listing see the whole bucket.
-   Set `WRITE_PREFIXES=*` to lift this.
-
+   Set `WRITE_PREFIXES=*` to lift the prefix restriction only, not the control bounds below.
 5. CSRF: every request other than GET/HEAD/OPTIONS must be same-origin (`Sec-Fetch-Site:
    same-origin`, or `Origin` equal to the Worker origin when that header is absent), and the
-   JSON write routes require `Content-Type: application/json`. Otherwise 403.
+   JSON write routes require a `Content-Type` header starting with `application/json`
+   (case-insensitive, so charset parameters are supported). Otherwise 403.
 6. Static dashboard files are served by the Worker itself (`env.ASSETS.fetch`) after the
    checks above, because R2-Explorer 1.2.0 does not serve them and `run_worker_first`
    bypasses the asset layer. Only `/api/*` goes to R2-Explorer.
 
-`workers_dev` and `preview_urls` are false, so there is no public `*.workers.dev` URL.
-The config contains no routes, domains or account ids.
+The checked-in Wrangler config disables `workers_dev` and `preview_urls` and
+does not specify routes, domains, or an account ID.
 
 ## Dependency policy
 
@@ -43,23 +44,50 @@ refuse unsupported versions, but this is not universal pre-resolution
 protection: older npm can resolve dependencies before checking engines. A
 warning or later refusal does not undo that resolution.
 
-## Deploy
+## Non-deploy verification
+
+[Backup CI](../.github/workflows/ci.yml) runs **Worker verification (no deploy)**
+for PRs that touch `worker/` (including drafts), full-run PRs, and non-PR runs.
+It selects preinstalled Node 24 and checks for supported npm and the effective
+policy above before running `npm ci --no-audit --no-fund`. It checks that the
+manifest and lockfile stay unchanged, then runs the finite control and
+integration fixtures in `test/`, `npm run typecheck`, and `npm run build`
+(`wrangler deploy --dry-run --outdir dist`). The wrapper and pinned Explorer
+fixtures use mocked Access certs and R2, not a live bucket. Use a successful
+Worker job for the exact revision under review; a skipped job is not evidence.
+CI does not deploy, configure Access, or refresh dependencies.
+
+## Deploy (authorized operators only)
+
+Production deployment requires separate release qualification and approval.
+These are manual instructions, not evidence that a Worker, domain, Access app,
+or credentials are in place. Use Node 24 and stable npm 11.19.0 or newer. Check
+the actual versions (`node --version`, `npm --version`) before installing. From
+the repo root, verify the effective policy and install from the lockfile:
 
 ```bash
-cd worker
-npm ci
-npx tsc --noEmit                         # typecheck
-npx wrangler deploy --dry-run --outdir dist   # build check, no network deploy
-
-# Access settings (see below), then:
-npx wrangler login                        # or export CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID
-npx wrangler deploy
-printf '%s' '<TEAM_NAME>' | npx wrangler secret put ACCESS_TEAM_NAME
-printf '%s' '<AUD_TAG>'   | npx wrangler secret put ACCESS_AUD
+cd worker &&
+  test "$(npm config get min-release-age)" = 3 &&
+  test "$(npm config get ignore-scripts)" = true &&
+  npm ci --no-audit --no-fund
 ```
 
-Then attach a custom domain to the Worker (dashboard: Worker, Settings, Domains and Routes,
-or the Workers Domains API) for a hostname in a zone on your account.
+Proceed only after that succeeds. From `worker/`, use the installed, locked
+Wrangler, not a CLI fetched on demand. Use existing authorized Cloudflare
+credentials or, if interactive login is authorized, `./node_modules/.bin/wrangler login`.
+For token-based deployments, set `CLOUDFLARE_ACCOUNT_ID` to the intended account.
+Verify the target account before running any separately authorized deployment or
+secret update:
+
+```bash
+./node_modules/.bin/wrangler deploy
+./node_modules/.bin/wrangler secret put ACCESS_TEAM_NAME
+./node_modules/.bin/wrangler secret put ACCESS_AUD
+```
+
+Supply the values at the CLI prompts. Configure the Access app before exposing
+the Worker on a custom domain (Worker → Settings → Domains and Routes, or the
+Workers Domains API). See the setup below.
 
 ## Cloudflare Access setup
 
@@ -70,30 +98,63 @@ or the Workers Domains API) for a hostname in a zone on your account.
    - Identity providers: the "Login with Cloudflare" provider (restrict to account members); disable others.
    - Policy: Allow, include only the owner identity (an email, or the account-members group).
    - Cookie settings (same screen): **SameSite = Lax** (or Strict), **HttpOnly** on, and
-     **Enable binding cookie** on. The Access default is SameSite=None, which sends the
-     session cookie on cross-site requests; the Worker's CSRF check is defence in depth.
-   - Session duration: short (for example 8h) is fine; the Worker accepts only unexpired tokens.
+     **Enable binding cookie** on. These settings complement the Worker's CSRF check.
+   - Use a short session duration (for example, 8 hours).
 3. Open the application, Overview: copy **Application Audience (AUD) Tag**. That is `ACCESS_AUD`.
    Via API it is the `aud` field of the Access application object.
 4. The Worker domain must have **no other route that skips Access** (no bypass policies).
 
-## Limits and behaviour
+## Request limits and supported inputs
 
-- Uploads from the browser go through the Worker. R2-Explorer uses a single `PUT` for small
-  files and R2 multipart upload (create, part, complete) for large ones, sending each part
-  through the Worker. The Workers request body limit applies per request (100 MB on Free
-  and Pro, 200 MB Business, 500 MB Enterprise), so parts must stay under it; the dashboard
-  chunks files itself. Verify with one large test upload on the plan in use.
-  Multi-GB uploads work but are slow and happen from the browser tab, which must stay open.
-- Downloads stream the R2 body through the Worker (no buffering), so multi-GB files do not
-  hit memory limits. Range requests are supported by the object GET. The ~230 MB DB dumps
-  and growing are fine. A dropped connection means restart, so for very large restores prefer
-  `rclone` against the S3 endpoint.
-- Worker CPU limit is irrelevant for streaming (I/O wait is not billed as CPU); free plan
-  request counts (100k/day) are ample here.
-- Folder rename is not implemented by R2-Explorer (roadmap). Rename/move works per file,
-  moving a "folder" means moving each object. Move is copy then delete.
-- Listings are paginated by R2 (1000 keys per page).
-- The dashboard UI still shows Share, Email and "public URL" entries; the Worker answers 404 for them.
-- R2-Explorer is pinned exactly; upgrade deliberately and re-check that write routes
-  (`writeTargets` in `src/index.ts`) still match `node_modules/r2-explorer/dist/index.mjs`.
+After Access and CSRF checks, the wrapper validates API queries and recognized
+controls before handing requests to R2-Explorer. These checks still apply with
+`WRITE_PREFIXES=*`.
+
+- **JSON controls:** The bucket `POST` routes for move, copy, folder creation,
+  delete, multipart completion, and metadata edits accept JSON objects. The
+  [reader](src/control-reader.ts) accepts up to **4 MiB (4,194,304 bytes)** of
+  actual body data, inclusive, with a **10-second body-read deadline**. The limit
+  still applies when `Content-Length` is absent or understates the body size.
+  `Content-Encoding` must be absent or `identity`. The wrapper validates the
+  parsed object and replays the original bytes, without the original length or
+  encoding header, to Explorer. Metadata edits require `customMetadata` and
+  `httpMetadata` objects; the wrapper does not recursively validate their values.
+- **API queries:** The [routing checks](src/control-routing.ts) cap the serialized
+  query string at **8,192 UTF-8 bytes**, excluding `?`. Use repeated names for
+  `include` (for example, `include=httpMetadata&include=customMetadata`), not CSV
+  or a JSON array. The wrapper accepts at most **16** values of at most **64 UTF-8
+  bytes** each, and only `httpMetadata` and `customMetadata` are supported.
+- **Keys:** The [validation checks](src/control-validation.ts) cap Base64 control
+  keys at **4,096 UTF-8 bytes** encoded and **1,024 UTF-8 bytes** decoded. The
+  decoded folder budget includes the `/` Explorer adds if missing. Metadata
+  edits use a URL-escaped Base64 key in the path, with the same encoded byte cap
+  applied to the normalized path segment before decoding it; the pinned routing
+  also supports double-escaped metadata keys.
+- **Multipart:** Completion requires **1–10,000** `parts`, each with an integer
+  `partNumber` from **1–10,000** and an opaque `etag` string of at most **256
+  UTF-8 bytes**. The wrapper preserves entry order and etag contents. The
+  `uploadId` is capped at **2,048 UTF-8 bytes** for completion and part uploads.
+  Part uploads carry `partNumber` as a digits-only query value in the same range.
+
+Wrapper control rejections use a fixed `Control request rejected` response with
+`Cache-Control: no-store` and do not log request contents. Invalid controls
+return `400`, read timeouts `408`, oversized body lengths or streams `413`, and
+unsupported control-body encodings `415`. Access, CSRF, prefix authorization, and
+Explorer's own errors are separate from those responses.
+
+### Streaming and scope
+
+The `POST` object upload, multipart creation, and part upload routes bypass the
+JSON body reader. Their query inputs are still checked, and object and part
+bodies pass through as streams. Multipart **completion** is a bounded JSON
+control, not a part upload. The wrapper passes Explorer download responses
+through without buffering them. Cloudflare's plan-specific request-body limit
+still applies to each single object upload and to each multipart part; R2 limits
+also apply.
+
+These are per-request control limits, not a total isolate memory budget,
+concurrency cap, rate limit, or end-to-end deadline. They do not establish the
+identity or safety of a deployed Worker or remediate a dependency advisory.
+When changing the pinned R2-Explorer or its Chanfana router, re-check the
+[wrapper's write targets](src/index.ts), [control routes and query representation](src/control-routing.ts),
+and [pinned Explorer fixtures](test/explorer.test.mjs) against the new version.
