@@ -125,6 +125,8 @@ jobs:
         run: node --test test/control-headers.test.mjs
       - name: Bounded control reader regressions
         run: node --test test/control-reader.test.mjs
+      - name: Control body validation regressions
+        run: node --test test/control-validation.test.mjs
       - name: Typecheck Worker
         run: npm run typecheck
       - name: Non-deploy Worker build
