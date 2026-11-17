@@ -63,7 +63,9 @@ test("bounded scalars count UTF-8 and preserve opaque values", () => {
   assert.throws(() => checkControl("multipart/complete", body), rejected(400));
   assert.equal(decodedKey(encode("db/☃")), "db/☃");
   assert.equal(decodedKey("%%%"), null);
-  assert.equal(decodedKey("a".repeat(4097)), null);
+  const padded = encode("db/example").padEnd(4096);
+  assert.equal(decodedKey(padded), "db/example");
+  assert.equal(decodedKey(padded + " "), null);
 });
 
 test("fixed fields and metadata retain unknown-field stripping compatibility", () => {

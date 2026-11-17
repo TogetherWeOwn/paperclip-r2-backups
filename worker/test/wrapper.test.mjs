@@ -21,7 +21,9 @@ async function denied(req, status, overrides = {}) {
   assert.equal(response.status, status);
   assert.equal(delegated.length, 0);
   assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.ok(new TextEncoder().encode(await response.text()).length <= 1024);
+  const body = await response.arrayBuffer();
+  assert.ok(body.byteLength <= 1024);
+  return body;
 }
 
 test("authentication and availability fail before application body reads", async () => {
@@ -127,12 +129,18 @@ test("streaming upload/create/part are not mistaken for control JSON", async () 
 test("control failure responses are no-store and at most 1024 bytes", async (t) => {
   const folder = path("folder");
   await denied(request(folder, { body: "{" }), 400);
-  await denied(request(folder, { body: "{}", headers: { "content-length": String(CONTROL_LIMITS.bytes + 1) } }), 413);
+  const oversized = new ReadableStream({
+    pull(controller) {
+      controller.enqueue(new Uint8Array(CONTROL_LIMITS.bytes + 1));
+      controller.close();
+    },
+  }, { highWaterMark: 0 });
+  await denied(request(folder, { body: oversized }), 413);
   await denied(request(folder, { body: "{}", headers: { "content-encoding": "gzip" } }), 415);
 
   const broken = request(folder, { body: "{}" });
   t.mock.method(broken.body, "getReader", () => { throw new Error("fixture reader unavailable"); });
-  await denied(broken, 500);
+  assert.equal(new TextDecoder().decode(await denied(broken, 500)), "Control request rejected");
 
   let now = Date.now();
   t.mock.method(Date, "now", () => now);
