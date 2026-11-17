@@ -26,7 +26,7 @@ export function controlUrl(value: string): ControlUrl {
 /** Exact POST routes in the pinned Explorer. Binary routes never enter the JSON reader. */
 export function controlRoute(method: string, url: ControlUrl): ControlRoute | null {
   if (method !== "POST") return null;
-  const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/(.+)$/)?.[1];
+  const rest = url.pathname.match(/^\/api\/buckets\/[^/]+\/([\s\S]+)$/)?.[1];
   if (!rest || ["upload", "multipart/create", "multipart/upload"].includes(rest)) return null;
   if (["move", "copy", "folder", "delete", "multipart/complete"].includes(rest)) return rest as ControlRoute;
   return rest.includes("/") ? null : "metadata";

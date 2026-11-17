@@ -28,6 +28,11 @@ test("only exact POST controls are classified; streams and aliases remain exclud
   }
   assert.equal(controlRoute("POST", controlUrl(base + "multipart%2Fcomplete")), "metadata");
   assert.equal(controlRoute("POST", controlUrl(base + "ZGIvZmlsZQ%3D%3D")), "metadata");
+  for (const key of ["ZG%0AIvYQ==", "ZG%0DIvYQ==", "%0A", "%0D"]) {
+    assert.equal(controlRoute("POST", controlUrl(base + key)), "metadata");
+    assert.equal(controlRoute("GET", controlUrl(base + key)), null);
+    assert.equal(controlRoute("POST", controlUrl(base + key + "/extra")), null);
+  }
   for (const method of ["GET", "PUT", "PATCH", "DELETE"]) {
     assert.equal(controlRoute(method, controlUrl(base + "folder")), null);
   }
