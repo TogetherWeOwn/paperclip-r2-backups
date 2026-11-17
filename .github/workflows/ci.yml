@@ -129,6 +129,8 @@ jobs:
         run: node --test test/control-validation.test.mjs
       - name: Control routing and query regressions
         run: node --test test/control-routing.test.mjs
+      - name: Control request replay regressions
+        run: node --test test/control-replay.test.mjs
       - name: Typecheck Worker
         run: npm run typecheck
       - name: Non-deploy Worker build
