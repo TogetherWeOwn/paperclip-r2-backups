@@ -100,6 +100,16 @@ const deny = (status: number, msg: string) =>
 const controlFailure = (status: number) => deny(status, "Control request rejected");
 const fromB64 = decodedKey;
 
+function metadataKey(raw: string): string | null {
+  if (raw.length > VALIDATION_LIMITS.encodedKeyBytes || new TextEncoder().encode(raw).byteLength > VALIDATION_LIMITS.encodedKeyBytes) return null;
+  try {
+    const param = decodeURIComponent(raw);
+    return fromB64(param) ?? fromB64(decodeURIComponent(param));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Keys a request would modify, derived from R2-Explorer's write endpoints.
  * Returns null for non-write requests, [] for a write we cannot attribute (denied).
@@ -123,13 +133,8 @@ function writeTargets(req: Request, url: ControlUrl, body?: Record<string, unkno
   }
   // POST /api/buckets/:bucket/:key  (metadata edit)
   if (req.method === "POST" && !rest.includes("/")) {
-    let k: string | null;
-    try {
-      k = fromB64(decodeURIComponent(rest));
-    } catch {
-      k = null;
-    }
-    return k === null ? [] : [k];
+    const key = metadataKey(rest);
+    return key === null ? [] : [key];
   }
   return [];
 }
@@ -228,10 +233,7 @@ export default {
             || Number(part) > VALIDATION_LIMITS.parts) throw new ControlError(400);
         }
       }
-      if (route === "metadata") {
-        const key = decodeURIComponent(url.pathname.split("/").pop()!);
-        if (fromB64(key) === null) throw new ControlError(400);
-      }
+      if (route === "metadata" && metadataKey(url.pathname.split("/").pop()!) === null) throw new ControlError(400);
     } catch (error) {
       return controlFailure(error instanceof ControlError ? error.status : 500);
     }

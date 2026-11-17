@@ -42,6 +42,23 @@ test("pinned Explorer metadata records and list-query representation stay compat
   assert.equal(calls[2][1].limit, 1);
 });
 
+test("pinned Explorer resolves double-encoded metadata keys under wildcard and managed prefixes", async () => {
+  const calls = [];
+  const bucket = {
+    async get(key) { calls.push(["get", key]); return { body: "fixture" }; },
+    async put(key) { calls.push(["put", key]); return { key }; },
+  };
+  const body = { customMetadata: {}, httpMetadata: {} };
+  const route = (key) => path(encodeURIComponent(encodeURIComponent(encode(key))));
+  for (const WRITE_PREFIXES of ["*", undefined]) {
+    const response = await worker.fetch(request(route("db/a"), { body }), { ...env, BACKUPS: bucket, WRITE_PREFIXES }, {});
+    assert.equal(response.status, 200);
+  }
+  assert.deepEqual(calls, [["get", "db/a"], ["put", "db/a"], ["get", "db/a"], ["put", "db/a"]]);
+  assert.equal((await run(request(route("outside/a"), { body }), noR2)).status, 403);
+  assert.equal((await run(request(route("db/" + "a".repeat(1022)), { body }), noR2)).status, 400);
+});
+
 test("pinned Explorer multipart create/upload and object upload retain streams", async () => {
   const calls = [];
   const bucket = {
