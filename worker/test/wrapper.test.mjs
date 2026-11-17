@@ -124,6 +124,27 @@ test("streaming upload/create/part are not mistaken for control JSON", async () 
   }
 });
 
+test("control failure responses are no-store and at most 1024 bytes", async (t) => {
+  const folder = path("folder");
+  await denied(request(folder, { body: "{" }), 400);
+  await denied(request(folder, { body: "{}", headers: { "content-length": String(CONTROL_LIMITS.bytes + 1) } }), 413);
+  await denied(request(folder, { body: "{}", headers: { "content-encoding": "gzip" } }), 415);
+
+  const broken = request(folder, { body: "{}" });
+  t.mock.method(broken.body, "getReader", () => { throw new Error("fixture reader unavailable"); });
+  await denied(broken, 500);
+
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const delayed = new ReadableStream({
+    pull(controller) {
+      now += CONTROL_LIMITS.milliseconds;
+      controller.close();
+    },
+  }, { highWaterMark: 0 }); // Advance the clock only once the wrapper reads.
+  await denied(request(folder, { body: delayed }), 408);
+});
+
 test("invalid controls and query inputs never delegate or generate rejection logs", async () => {
   const logs = [mock.method(console, "error", () => {}), mock.method(console, "warn", () => {}), mock.method(console, "log", () => {})];
   try {

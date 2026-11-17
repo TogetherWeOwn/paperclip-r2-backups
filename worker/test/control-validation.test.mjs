@@ -9,6 +9,12 @@ const bytes = (s) => new TextEncoder().encode(s);
 const valid = () => ({ key: encode("db/example"), uploadId: "upload", parts: [{ etag: '"opaque"', partNumber: 1 }] });
 const rejected = (status) => (e) => e instanceof ControlError && e.status === status;
 
+test("control validation defaults", () => {
+  assert.deepEqual(VALIDATION_LIMITS, {
+    parts: 10000, etagBytes: 256, keyBytes: 1024, encodedKeyBytes: 4096, uploadIdBytes: 2048,
+  });
+});
+
 test("folder budgets include the effective trailing separator", () => {
   checkControl("folder", { key: encode("a".repeat(1023)) });
   checkControl("folder", { key: encode("a".repeat(1023) + "/") });
